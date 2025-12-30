@@ -11,33 +11,27 @@ import openpyxl
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 
-# --- 1. 页面配置 ---
-st.set_page_config(page_title="亚马逊 AI 极速填充 V6.3", layout="wide")
+# --- 1. 頁面配置 ---
+st.set_page_config(page_title="亞馬遜 AI 權重埋詞版 V6.4", layout="wide")
 
 api_key = st.secrets.get("OPENAI_API_KEY") or ""
 
-# --- 2. 深度优化的 AI 指令 ---
+# --- 2. 深度優化的 AI 權重指令 ---
 SYSTEM_LOGIC = """
-You are an Amazon Listing Expert. All output in ENGLISH.
-1. Title: Professional title (120-130 chars). Start with Brand.
-2. Search Terms: Extract individual words only: Core keywords + Pattern Elements (e.g., Abstract, Floral, Zen) + Scenarios (e.g., Office, Home Decor) + Functional words (e.g., Gift, Modern). No commas.
-3. Bullets: 5 points. Focus on quality, size details, 3D effect, easy to hang, and gift value.
-4. Description: HTML format.
-5. Color: Identify the MAIN PATTERN ELEMENT (e.g., Forest, BlueGeometric, Minimalist) as a specific color value.
+You are an Amazon Listing Expert. Follow the weight-based placement plan (Left to Right weight):
+1. Title: Priority 1 (High Weight). Start with [Brand]. Use Main Category Phrases (Group I) + 1-2 Theme Phrases (Group III). Length: 130-150 chars.
+2. Bullets: Priority 2. Use Expand Phrases (Group II) and Function words (Group V). Focus on quality, 3D effect, and scenarios.
+3. Description: Priority 3. Use natural language with HTML tags. Include synonyms and long-tail phrases.
+4. Search Terms: ONLY individual words. Blend [Generic Words] + [Pattern Elements] + [Function words]. No repetition.
+5. Color: Identify the MAIN PATTERN (e.g., Autumn Forest, Blue Ocean).
 """
 
-# --- 3. 核心清洗函数 ---
-def clean_for_excel(text):
-    """移除可能导致 Excel 显示乱码的特殊字符"""
-    if not text: return ""
-    # 只保留可见字符和标准标点，移除特殊转义符
-    text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', text)
-    return text.strip()
-
-def enrich_keywords(ai_kw, user_kw):
-    """强力融合关键词：单词化、去重、限长 245 字符"""
-    raw_combined = f"{ai_kw} {user_kw}".lower().replace(',', ' ').replace('.', ' ')
-    words = re.findall(r'\b[a-z0-9]{2,}\b', raw_combined)
+# --- 3. 核心清洗與權重融合函數 ---
+def clean_st_words(ai_keywords, user_words, pattern_element):
+    """將單詞庫與圖案元素深度融合，權重從左往右，限長 245 字符"""
+    # 融合順序：圖案元素 > AI 提取詞 > 通用單詞庫
+    combined = f"{pattern_element} {ai_keywords} {user_words}".lower().replace(',', ' ').replace('.', ' ')
+    words = re.findall(r'\b[a-z0-9]{2,}\b', combined)
     
     unique_words = []
     seen = set()
@@ -56,25 +50,25 @@ def process_img(file):
     img.convert("RGB").save(buf, format="JPEG", quality=75)
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-def call_ai_task(img_file, sku_prefix, keywords):
+def call_ai_task(img_file, sku_prefix, all_kw_input):
     try:
         client = OpenAI(api_key=api_key)
         b64 = process_img(img_file)
-        prompt = f"{SYSTEM_LOGIC}\nSKU:{sku_prefix}\nKeywords:{keywords}\nReturn JSON:{{'title':'','desc':'','bp':['','','','',''],'keywords':'','color':''}}"
+        prompt = f"{SYSTEM_LOGIC}\nSKU:{sku_prefix}\nKeyword Pool:\n{all_kw_input}\nReturn JSON:{{'title':'','desc':'','bp':['','','','',''],'keywords':'','color':''}}"
         res = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}],
             response_format={"type":"json_object"},
-            timeout=40
+            timeout=45
         )
         return {"prefix": sku_prefix, "data": json.loads(res.choices[0].message.content)}
     except:
         return {"prefix": sku_prefix, "data": {}}
 
 # --- 4. 主界面 ---
-st.title("🤖 亚马逊 AI 极速填充系统 V6.3")
+st.title("🤖 亞馬遜 AI 權重埋詞填充系統 V6.4")
 
-st.subheader("⚙️ 核心配置")
+st.subheader("⚙️ 基礎配置")
 col_brand, col_price = st.columns([1, 2])
 with col_brand:
     brand_input = st.text_input("Brand (品牌名)", value="YourBrand")
@@ -82,21 +76,22 @@ with col_price:
     default_sp = pd.DataFrame([{"Size": '16x24"', "Price": "12.99"},{"Size": '24x36"', "Price": "19.99"},{"Size": '32x48"', "Price": "29.99"}])
     size_price_data = st.data_editor(default_sp, num_rows="dynamic")
 
-uploaded_imgs = st.file_uploader("🖼️ 上传图案图片", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
-user_keywords = st.text_area("📝 扩展词库", placeholder="粘贴关键词，AI 会自动融合去重...")
+uploaded_imgs = st.file_uploader("🖼️ 上傳圖片 (SKU前綴)", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+user_all_keywords = st.text_area("📝 填入完整關鍵詞方案 (詞組 + 單詞)", placeholder="請粘貼您的 Ⅰ-Ⅴ 類詞組以及通用單詞庫...", height=250)
 
-# --- 5. 执行填充 ---
-if st.button("🚀 启动极速处理", use_container_width=True):
-    if not uploaded_imgs: st.error("❌ 未发现图片")
+# --- 5. 執行填充 ---
+if st.button("🚀 啟動權重埋詞處理", use_container_width=True):
+    if not uploaded_imgs: st.error("❌ 未發現圖片")
     else:
         try:
-            with st.status("⚡ 正在并行生成文案并精准映射...") as status:
+            with st.status("⚡ 正在分析圖案並執行權重埋詞...") as status:
                 with ThreadPoolExecutor(max_workers=5) as executor:
-                    futures = [executor.submit(call_ai_task, img, os.path.splitext(img.name)[0], user_keywords) for img in uploaded_imgs]
+                    futures = [executor.submit(call_ai_task, img, os.path.splitext(img.name)[0], user_all_keywords) for img in uploaded_imgs]
                     all_results = [f.result() for f in futures]
                 
-                tpl_path = os.path.join("templates", [f for f in os.listdir("templates") if f.endswith(('.xlsx', '.xlsm'))][0])
-                wb = openpyxl.load_workbook(tpl_path, keep_vba=True)
+                # 自動抓取 templates 文件夾下的第一個 xlsx/xlsm
+                tpl_list = [f for f in os.listdir("templates") if f.endswith(('.xlsx', '.xlsm'))]
+                wb = openpyxl.load_workbook(os.path.join("templates", tpl_list[0]), keep_vba=True)
                 sheet = wb.active
                 
                 headers = {str(cell.value).strip().lower(): cell.column for row in sheet.iter_rows(min_row=1, max_row=3) for cell in row if cell.value}
@@ -110,35 +105,35 @@ if st.button("🚀 启动极速处理", use_container_width=True):
                     prefix, data = res["prefix"], res["data"]
                     if not data: continue
                     
-                    full_keywords = enrich_keywords(data.get('keywords', ''), user_keywords)
+                    pattern_element = data.get('color', 'Modern')
+                    # Search Terms 融合：圖案元素 + AI 關鍵詞 + 用戶單詞庫
+                    final_st = clean_st_words(data.get('keywords', ''), user_all_keywords, pattern_element)
                     brand_title = f"{brand_input} {data.get('title', '')}"
-                    pattern_color = clean_for_excel(data.get('color', 'Multi-color'))
 
-                    # --- 填充父体 (Row 4) ---
+                    # --- 填充父體 (Row 4) ---
                     if idx == 0:
                         row_p = 4
                         def fill_p(name, val):
-                            if name in headers: sheet.cell(row=row_p, column=headers[name], value=clean_for_excel(val))
+                            if name in headers: sheet.cell(row=row_p, column=headers[name], value=str(val).strip())
                         
                         fill_p("seller sku", f"{prefix}-P")
                         fill_p("parentage", "parent")
                         fill_p("product name", brand_title)
                         fill_p("product description", data.get('desc', ''))
-                        fill_p("generic keyword", full_keywords)
-                        # 父类 Color 放空
-                        fill_p("color", "")
+                        fill_p("generic keyword", final_st)
+                        fill_p("color", "") # 父類 Color 放空
                         fill_p("color map", "")
                         for b_i, c_i in enumerate(bp_cols[:5]):
                             if b_i < len(data.get('bp', [])):
-                                sheet.cell(row=row_p, column=c_i, value=clean_for_excel(data['bp'][b_i]))
+                                sheet.cell(row=row_p, column=c_i, value=data['bp'][b_i])
 
-                    # --- 填充子体 ---
+                    # --- 填充子體 ---
                     for _, r_data in size_price_data.iterrows():
                         sz, pr = str(r_data["Size"]), str(r_data["Price"])
                         c_sku = f"{prefix}-{sz.replace('\"','').replace(' ', '')}"
                         
                         def fill_c(name, val):
-                            if name in headers: sheet.cell(row=current_row, column=headers[name], value=clean_for_excel(val))
+                            if name in headers: sheet.cell(row=current_row, column=headers[name], value=str(val).strip())
                         
                         fill_c("seller sku", c_sku)
                         fill_c("parent sku", f"{all_results[0]['prefix']}-P")
@@ -150,20 +145,19 @@ if st.button("🚀 启动极速处理", use_container_width=True):
                         fill_c("sale start date", s_start)
                         fill_c("sale end date", s_end)
                         fill_c("product description", data.get('desc', ''))
-                        fill_c("generic keyword", full_keywords)
-                        # 子类使用图案词填充 Color
-                        fill_c("color", pattern_color)
-                        fill_c("color map", pattern_color)
+                        fill_c("generic keyword", final_st)
+                        fill_c("color", pattern_element)
+                        fill_c("color map", pattern_element)
                         
                         for b_i, c_i in enumerate(bp_cols[:5]):
                             if b_i < len(data.get('bp', [])):
-                                sheet.cell(row=current_row, column=c_i, value=clean_for_excel(data['bp'][b_i]))
+                                sheet.cell(row=current_row, column=c_i, value=data['bp'][b_i])
                         current_row += 1
                 
-                status.update(label="✅ 填充已完成，已优化显示与颜色逻辑", state="complete")
+                status.update(label="✅ 權重埋詞完成！", state="complete")
 
             output = io.BytesIO()
             wb.save(output)
-            st.download_button("💾 下载优化后的表格", output.getvalue(), f"Amazon_V6.3.xlsm", use_container_width=True)
+            st.download_button("💾 下載填充好的表格", output.getvalue(), f"Amazon_Listing_V6.4.xlsm", use_container_width=True)
         except Exception as e:
-            st.error(f"❌ 运行失败: {e}")
+            st.error(f"❌ 嚴重錯誤: {e}")
