@@ -6,101 +6,118 @@ import base64
 from datetime import datetime, timedelta
 from openai import OpenAI
 
-# --- 1. 頁面配置 (對齊決策系統風格) ---
-st.set_page_config(page_title="亞馬遜 AI 智能上架系統 V4.0", layout="wide")
+# --- 1. 页面基础配置 ---
+st.set_page_config(page_title="亚马逊 AI 智能上架系统 V4.1", layout="wide")
 
-# 安全讀取 Secrets 中的 Key
+# 安全读取 Secrets 中的 OpenAI Key
 if "OPENAI_API_KEY" in st.secrets:
     api_key = st.secrets["OPENAI_API_KEY"]
 else:
     api_key = st.sidebar.text_input("🔑 填入 API Key (若 Secrets 未配置)", type="password")
 
-# --- 2. 側邊欄：模板與類目管理 ---
+# --- 2. 侧边栏：模板管理 (兼容 .xlsm) ---
 with st.sidebar:
     st.header("📂 官方模板配置")
-    # 從 templates 文件夾讀取官方 xlsx
-    t_path = "templates/"
-    all_tpls = [f for f in os.listdir(t_path) if f.endswith('.xlsx')] if os.path.exists(t_path) else []
-    selected_tpl = st.selectbox("選擇當前上架類目模板", all_tpls if all_tpls else ["請先上傳模板至 templates/"])
     
+    # 动态获取当前目录下 templates 文件夹路径
+    t_path = os.path.join(os.getcwd(), "templates")
+    if not os.path.exists(t_path):
+        os.makedirs(t_path)
+    
+    # 读取所有 .xlsx 和 .xlsm 文件
+    all_tpls = [f for f in os.listdir(t_path) if f.endswith('.xlsx') or f.endswith('.xlsm')]
+    
+    if all_tpls:
+        selected_tpl = st.selectbox("选择当前上架类目模板", all_tpls)
+        st.success(f"✅ 已加载 {len(all_tpls)} 个模板")
+    else:
+        st.error("⚠️ 未在 templates 文件夹发现模板")
+        selected_tpl = st.selectbox("状态", ["请检查 GitHub 仓库路径"])
+
+    # 备用手动上传
     st.divider()
-    st.header("⚙️ 輸出偏好")
-    lang = st.radio("文案語言", ["英文 (US)", "德文 (DE)", "日文 (JP)"])
-    tone = st.selectbox("文案風格", ["專業吸引", "簡潔有力", "感性描述"])
+    manual_tpl = st.file_uploader("📤 或在此直接上传备用模板", type=["xlsx", "xlsm"])
 
-# --- 3. 主界面布局 ---
-st.title("🤖 亞馬遜 AI 智能 Flat File 填充站")
+# --- 3. 辅助函数：图片编码与 AI 调用 ---
+def encode_img(file):
+    """将图片文件转换为 Base64 字符串"""
+    return base64.b64encode(file.getvalue()).decode('utf-8')
 
-# 第一行：圖片上傳與 AI 指令
+def call_ai_vision(img_file, sku, instruction):
+    """调用 GPT-4o 进行视觉识别"""
+    client = OpenAI(api_key=api_key)
+    b64 = encode_img(img_file)
+    
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"SKU: {sku}. 指令: {instruction}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            ]
+        }],
+        max_tokens=800
+    )
+    return response.choices[0].message.content
+
+# --- 4. 主界面布局 ---
+st.title("🤖 亚马逊智能 AI 视觉填充系统")
+
 col_img, col_cmd = st.columns([1, 1])
 
 with col_img:
-    st.subheader("🖼️ 1. 上傳產品圖片")
-    uploaded_imgs = st.file_uploader("支持多圖批量上傳，文件名即為 SKU", 
+    st.subheader("🖼️ 1. 上传图片 (AI 识别图案)")
+    uploaded_imgs = st.file_uploader("文件名即为 SKU", 
                                      type=["jpg", "png", "jpeg"], accept_multiple_files=True)
-    if uploaded_imgs:
-        st.write(f"✅ 已加載 {len(uploaded_imgs)} 張圖片")
 
 with col_cmd:
-    st.subheader("💬 2. ChatGPT 視覺分析指令")
-    user_instruction = st.text_area("給 AI 的具體要求", 
-                                    value="請識別圖片中的圖案元素、顏色、材質。生成吸引人的標題(150字內)、5點描述、以及精確的圖案元素詞(用於Color欄位)。",
+    st.subheader("💬 2. ChatGPT 视觉指令")
+    user_instruction = st.text_area("文案要求", 
+                                    value="请识别图中的图案元素和风格。写出吸引人的标题、5点描述、Search Terms、以及用于Color栏位的图案词。",
                                     height=150)
 
-# --- 4. 核心功能：AI 視覺與數據填充 ---
-def encode_img(file):
-    return base64.b64encode(file.getvalue()).decode('utf-8')
-
-if st.button("🔥 啟動 AI 識別並填充官方表格", use_container_width=True):
+# --- 5. 核心逻辑执行 ---
+if st.button("🚀 启动 AI 视觉分析并填充表格", use_container_width=True):
     if not uploaded_imgs:
-        st.error("請先上傳圖片！")
+        st.error("请先上传产品图片")
     elif not api_key:
-        st.error("缺少 API Key！")
+        st.error("缺少 API Key，请在 Secrets 或侧边栏配置")
     else:
         results = []
         progress = st.progress(0)
-        client = OpenAI(api_key=api_key)
+        
+        # 促销时间计算 (昨天到一年后)
+        today = datetime.now()
+        s_start = (today - timedelta(days=1)).strftime('%Y-%m-%d')
+        s_end = (today - timedelta(days=1) + timedelta(days=364)).strftime('%Y-%m-%d')
 
         for idx, img in enumerate(uploaded_imgs):
-            sku = os.path.splitext(img.name)[0] # 從文件名提取 SKU
-            st.toast(f"AI 正在分析圖片: {sku}...")
+            sku = os.path.splitext(img.name)[0]
+            st.write(f"正在分析 SKU: **{sku}**...")
             
-            # 調用 GPT-4o 視覺
-            b64 = encode_img(img)
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"SKU: {sku}. 指令: {user_instruction}"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                    ]
-                }],
-                max_tokens=800
-            )
-            ai_content = response.choices[0].message.content
-            
-            # 自動計算時間 (昨天到一年後)
-            t = datetime.now()
-            results.append({
-                "item_sku": sku,
-                "AI_Draft_Review": ai_content, # 先展示 AI 草稿供確認
-                "sale_start_date": (t - timedelta(days=1)).strftime('%Y-%m-%d'),
-                "sale_end_date": (t + timedelta(days=364)).strftime('%Y-%m-%d')
-            })
+            try:
+                ai_text = call_ai_vision(img, sku, user_instruction)
+                results.append({
+                    "item_sku": sku,
+                    "AI 分析结果 (请复制填入官方表)": ai_text,
+                    "sale_start_date": s_start,
+                    "sale_end_date": s_end
+                })
+            except Exception as e:
+                st.error(f"SKU {sku} 分析失败: {e}")
+                
             progress.progress((idx + 1) / len(uploaded_imgs))
 
-        # --- 5. 輸出預覽與導出 ---
+        # 结果预览与导出
         st.divider()
-        st.subheader("📊 3. 填充結果預覽 (對齊官方欄位)")
-        df_final = pd.DataFrame(results)
-        st.dataframe(df_final, use_container_width=True)
+        st.subheader("📊 3. 填充结果预览")
+        final_df = pd.DataFrame(results)
+        st.dataframe(final_df, use_container_width=True)
 
-        # 導出為 Excel
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_final.to_excel(writer, index=False, sheet_name='Template')
+            final_df.to_excel(writer, index=False, sheet_name='Sheet1')
         
-        st.download_button("💾 下載填充好的官方表格", output.getvalue(), 
-                           file_name=f"Amazon_Listing_{datetime.now().strftime('%m%d')}.xlsx",
-                           use_container_width=True)
+        st.download_button("💾 下载分析好的数据 (Excel)", output.getvalue(), 
+                           file_name=f"Amazon_Listing_{today.strftime('%m%d')}.xlsx")
