@@ -1,153 +1,157 @@
 import streamlit as st
 import pandas as pd
-import io
-import os
-import base64
-import json
-import openpyxl
-import re
-from openpyxl.styles import Font
-from openai import OpenAI
-from PIL import Image
+import io, os, base64, json, re, openpyxl
 from datetime import datetime, timedelta
+from openai import OpenAI
 
-# --- 1. 自动计算促销时间逻辑 ---
+# --- 1. 自动日期逻辑 ---
 today = datetime.now()
 auto_start_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
-auto_end_date = ((today - timedelta(days=1)) + timedelta(days=365) - timedelta(days=1)).strftime("%Y-%m-%d")
+auto_end_date = ((today - timedelta(days=1)) + timedelta(days=365)).strftime("%Y-%m-%d")
 
-st.set_page_config(page_title="亚马逊 AI 专家 V9.4 - 规格强化版", layout="wide")
+st.set_page_config(page_title="亚马逊 AI 专家 V9.7 - 深度对位版", layout="wide")
 api_key = st.secrets.get("OPENAI_API_KEY") or ""
 
-# --- 辅助函数：清洗乱码 ---
-def clean_text(text):
-    if not text: return ""
-    # 移除不可见字符，保留标准 ASCII/UTF-8
-    return str(text).encode('utf-8', 'ignore').decode('utf-8').strip()
+# --- 2. 核心规则校验器 ---
+class ListingValidator:
+    @staticmethod
+    def clean(text):
+        if not text: return ""
+        # 彻底清洗乱码并确保字符串格式
+        return str(text).encode('utf-8', 'ignore').decode('utf-8').strip()
 
-# --- 2. 侧边栏 ---
+    @staticmethod
+    def format_keywords(elements, pool):
+        """规则：元素词+通用词，空格间隔"""
+        combined = f"{elements} {pool}"
+        clean = re.sub(r'[^a-zA-Z0-9\s]', ' ', combined)
+        return " ".join(clean.split())
+
+# --- 3. 侧边栏：规格定义 ---
 with st.sidebar:
-    st.header("⚙️ 基础配置")
+    st.header("⚙️ 规格锁定")
     brand_name = st.text_input("品牌名称", "YourBrand")
     tpl_list = [f for f in os.listdir("templates") if f.endswith(('.xlsx', '.xlsm'))]
-    selected_tpl = st.selectbox("选择模板", tpl_list) if tpl_list else None
+    selected_tpl = st.selectbox("选择模板", tpl_list)
     
     st.divider()
-    st.subheader("变体尺寸与售价")
-    # 尺寸编号示例：001, 002... 方便生成 Parent SKU 范围
-    s1, p1, n1 = st.text_input("尺寸 1", "16x24\""), st.text_input("售价 1", "12.99"), "001"
-    s2, p2, n2 = st.text_input("尺寸 2", "24x36\""), st.text_input("售价 2", "16.99"), "002"
-    s3, p3, n3 = st.text_input("尺寸 3", "32x48\""), st.text_input("售价 3", "19.99"), "003"
+    st.subheader("变体尺寸/定价/编号")
+    # 编号用于 SKU 范围生成，例如 001, 002
+    v1_s, v1_p, v1_n = st.text_input("尺寸 1", "16x24\""), st.text_input("售价 1", "12.99"), "001"
+    v2_s, v2_p, v2_n = st.text_input("尺寸 2", "24x36\""), st.text_input("售价 2", "16.99"), "002"
+    v3_s, v3_p, v3_n = st.text_input("尺寸 3", "32x48\""), st.text_input("售价 3", "19.99"), "003"
 
-# --- 3. SKU 对位矩阵 ---
-st.header("🖼️ SKU 精准对位矩阵")
-if 'sku_rows' not in st.session_state: st.session_state.sku_rows = 3
+# --- 4. 款式对位录入 ---
+st.header("🖼️ SKU 对位录入矩阵")
+if 'rows' not in st.session_state: st.session_state.rows = 2
+sku_list = []
 
-sku_data = []
-for i in range(st.session_state.sku_rows):
-    with st.expander(f"款式 {i+1} 录入区", expanded=True):
-        c1, c2, c3 = st.columns([1.5, 2, 2.5])
+for i in range(st.session_state.rows):
+    with st.expander(f"款式 {i+1}", expanded=True):
+        c1, c2, c3 = st.columns([2, 2, 2])
         with c1:
-            sku_name = st.text_input(f"SKU 名称 (例: ART)", key=f"s_{i}")
-            local_img = st.file_uploader(f"上传分析图", key=f"f_{i}")
+            # 用户输入 SKU 前缀，如 SQDQ-BH-XFCT
+            b_sku = st.text_input(f"SKU 前缀", key=f"bs_{i}", placeholder="例如: SQDQ-BH-XFCT")
+            img_file = st.file_uploader(f"分析图", key=f"img_{i}")
         with c2:
-            main_url = st.text_input(f"主图链接", key=f"m_{i}")
-            others = st.text_area(f"附图链接集", key=f"o_{i}", height=80)
+            m_url = st.text_input(f"主图 URL", key=f"mu_{i}")
+            o_urls = st.text_area(f"附图 URL 集", key=f"ou_{i}")
         with c3:
-            s1_u = st.text_input(f"{s1} 图片", key=f"s1u_{i}")
-            s2_u = st.text_input(f"{s2} 图片", key=f"s2u_{i}")
-            s3_u = st.text_input(f"{s3} 图片", key=f"s3u_{i}")
-        sku_data.append({"sku": sku_name, "img": local_img, "main": main_url, "others": others, "sz_urls": [s1_u, s2_u, s3_u]})
+            z1 = st.text_input(f"{v1_s} 图片", key=f"z1_{i}")
+            z2 = st.text_input(f"{v2_s} 图片", key=f"z2_{i}")
+            z3 = st.text_input(f"{v3_s} 图片", key=f"z3_{i}")
+        sku_list.append({"base": b_sku, "file": img_file, "main": m_url, "others": o_urls, "sz_urls": [z1, z2, z3]})
 
-if st.button("➕ 增加款式"):
-    st.session_state.sku_rows += 1
-    st.rerun()
+user_kw_pool = st.text_area("📝 通用关键词池")
 
-user_kw_pool = st.text_area("📝 通用关键词 (General Keywords)", height=80)
-
-# --- 4. 执行生成 ---
-if st.button("🚀 启动全自动化精准生成", use_container_width=True):
-    if not selected_tpl: st.error("请选择模板")
+# --- 5. 执行处理 ---
+if st.button("🚀 启动自动化精准生成", use_container_width=True):
+    if not selected_tpl: st.error("未选择模板")
     else:
         try:
-            with st.status("正在处理...") as status:
-                wb = openpyxl.load_workbook(os.path.join("templates", selected_tpl), keep_vba=True)
-                sheet = wb.active
+            wb = openpyxl.load_workbook(os.path.join("templates", selected_tpl), keep_vba=True)
+            sheet = wb.active
+            h = {str(c.value).strip().lower(): c.column for r in sheet.iter_rows(min_row=1, max_row=3) for c in r if c.value}
+            curr_row = 5
+            client = OpenAI(api_key=api_key)
+
+            for item in sku_list:
+                if not item["base"] or not item["file"]: continue
                 
-                h = {str(c.value).strip().lower(): c.column for r in sheet.iter_rows(min_row=1, max_row=3) for c in r if c.value}
-                defaults = {col: sheet.cell(row=4, column=col).value for col in range(1, sheet.max_column+1) if sheet.cell(row=4, column=col).value is not None}
+                # AI 视觉分析 - 强化标题丰富度
+                img_b64 = base64.b64encode(item["file"].read()).decode('utf-8')
+                prompt = """Analyze art. Return JSON: {
+                    'title': 'Rich title with style, material, and target room (max 150 chars)',
+                    'elements': 'key pattern elements',
+                    'color': 'primary color',
+                    'bp': ['Header: detailed content', 'Header: detailed content', ... 5 items]
+                }"""
+                res = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{img_b64}"}}]}],
+                    response_format={"type":"json_object"}
+                )
+                ai = json.loads(res.choices[0].message.content)
 
-                curr_row = 5
-                client = OpenAI(api_key=api_key)
-
-                for item in sku_data:
-                    if not item["sku"] or not item["img"]: continue
-                    
-                    # AI 视觉生成文案
-                    img_file = item["img"]
-                    img_b64 = base64.b64encode(img_file.read()).decode('utf-8')
-                    # 提示词强化：要求必须返回图案元素词
-                    prompt = f"Analyze this pattern. Return JSON: {{'title':'...','bp':['...','...','...','...','...'],'pattern_elements':'word1 word2','color':'color_name'}}"
-                    res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{img_b64}"}}]}], response_format={"type":"json_object"})
-                    ai = json.loads(res.choices[0].message.content)
-
-                    # --- 核心规格优化 ---
-                    
-                    # 1. Parent SKU 逻辑：编号范围 (例如 001-003)
-                    p_sku_name = f"{item['sku']}-{n1}-{n3}" 
-
-                    # 3个变体循环
-                    for idx, (sz_name, sz_price, sz_num) in enumerate([(s1, p1, n1), (s2, p2, n2), (s3, p3, n3)]):
-                        for col, val in defaults.items():
-                            sheet.cell(row=curr_row, column=col, value=val)
-                        
-                        def fill_col(k, v):
-                            target = [c for c in h if k.lower() in c]
-                            if target: 
-                                cleaned_v = clean_text(v)
-                                sheet.cell(row=curr_row, column=h[target[0]], value=cleaned_v)
-
-                        # 填充 Seller SKU
-                        fill_col("seller sku", f"{item['sku']}-{sz_num}")
-                        
-                        # 填充 Parent SKU
-                        fill_col("parent sku", p_sku_name)
-                        
-                        # 填充 Color & Color Map (规则：一致且包含元素词)
-                        final_color = f"{ai['color']} {ai['pattern_elements']}"
-                        fill_col("color", final_color)
-                        fill_col("color map", final_color)
-
-                        # 填充 Search Terms (规则：元素词 + 通用词，空格分隔)
-                        # 使用正则过滤掉非空格的符号，确保只有单词间空格
-                        raw_kw = f"{ai['pattern_elements']} {user_kw_pool}"
-                        clean_kw = " ".join(re.sub(r'[,;._/]+', ' ', raw_kw).split())
-                        fill_col("generic keyword", clean_kw)
-                        
-                        # 填充五点描述 (规则：修复乱码，确保5个)
-                        bp_list = ai.get('bp', [])
-                        # 如果AI返回不足5个，用默认值补齐
-                        while len(bp_list) < 5: bp_list.append("High-quality professional print with vivid details.")
-                        
-                        bp_cols = [c for c in h if "key product features" in c]
-                        for j in range(5):
-                            if j < len(bp_cols):
-                                fill_col(bp_cols[j], bp_list[j])
-
-                        # 其他基础字段
-                        fill_col("product name", f"{brand_name} {ai['title']} {ai['pattern_elements']} - {sz_name}")
-                        fill_col("sale price", sz_price)
-                        fill_col("sale start date", auto_start_date)
-                        fill_col("sale end date", auto_end_date)
-                        fill_col("main_image_url", item["main"])
-                        if item["sz_urls"][idx]: fill_col("other_image_url1", item["sz_urls"][idx])
-                        
-                        curr_row += 1
+                # --- 规则核心：生成父子体数据 ---
+                parent_range_sku = f"{item['base']}-{v1_n}-{v3_n}"
                 
-                status.update(label="✅ 生成成功！", state="complete")
-            
-            output = io.BytesIO()
-            wb.save(output)
-            st.download_button("💾 下载优化版模板", output.getvalue(), f"Listing_Optimized.xlsm")
+                # 变体列表：第一个元素设为 Parent 行
+                # 逻辑：Parent行之后接三个子变体
+                row_data = [
+                    {"type": "Parent", "sku": parent_range_sku, "sz": "", "pr": "", "no": ""},
+                    {"type": "Child", "sku": f"{item['base']}-{v1_n}", "sz": v1_s, "pr": v1_p, "idx": 0},
+                    {"type": "Child", "sku": f"{item['base']}-{v2_n}", "sz": v2_s, "pr": v2_p, "idx": 1},
+                    {"type": "Child", "sku": f"{item['base']}-{v3_n}", "sz": v3_s, "pr": v3_p, "idx": 2}
+                ]
+
+                for row in row_data:
+                    def fill(k, v):
+                        targets = [c_idx for c_name, c_idx in h.items() if k.lower() in c_name]
+                        if targets:
+                            sheet.cell(row=curr_row, column=targets[0], value=ListingValidator.clean(v))
+
+                    # 1. SKU 逻辑锁定
+                    fill("seller sku", row["sku"])
+                    fill("parent sku", parent_range_sku) # 每一行（包括父行自己）的 Parent SKU 都是范围
+
+                    # 2. 属性同步锁定
+                    full_color = f"{ai['color']} {ai['elements']}"
+                    fill("color", full_color)
+                    fill("color map", full_color)
+                    
+                    if row["type"] == "Child":
+                        fill("size", row["sz"])
+                        fill("size map", row["sz"])
+                        fill("sale price", row["pr"])
+
+                    # 3. 五点描述锁定 (父类和子类全填)
+                    ai_bps = ai.get('bp', [])
+                    while len(ai_bps) < 5: ai_bps.append("Expertly designed with high-definition printing.")
+                    for b_i in range(5):
+                        fill(f"key product features{b_i+1}", ai_bps[b_i])
+
+                    # 4. 标题增强 (品牌 + AI增强标题 + 元素词 + 尺寸)
+                    full_title = f"{brand_name} {ai['title']} {ai['elements']}"
+                    if row["type"] == "Child":
+                        full_title += f" - {row['sz']}"
+                    fill("product name", full_title[:199])
+
+                    # 5. 关键词与基础信息
+                    fill("generic keyword", ListingValidator.format_keywords(ai['elements'], user_kw_pool))
+                    fill("main_image_url", item["main"])
+                    fill("sale start date", auto_start_date)
+                    fill("sale end date", auto_end_date)
+                    
+                    if row["type"] == "Child" and item["sz_urls"][row["idx"]]:
+                        fill("other_image_url1", item["sz_urls"][row["idx"]])
+
+                    curr_row += 1
+
+            out = io.BytesIO()
+            wb.save(out)
+            st.success(f"✅ V9.7 规格锁定完成！Parent SKU 为: {parent_range_sku}")
+            st.download_button("💾 下载最终锁定版 Excel", out.getvalue(), "Listing_V9.7_Locked.xlsm")
+
         except Exception as e:
-            st.error(f"❌ 运行错误: {e}")
+            st.error(f"发生错误: {e}")
