@@ -6,49 +6,45 @@ from openai import OpenAI
 from openpyxl.styles import Font, Alignment
 from PIL import Image
 
-# --- 1. 頁面配置 ---
-st.set_page_config(page_title="亞馬遜 AI 規格鎖定 V7.1", layout="wide")
+# --- 1. 基础配置 ---
+st.set_page_config(page_title="亞馬遜 V7.2 終極穩定版", layout="wide")
 api_key = st.secrets.get("OPENAI_API_KEY") or ""
 
-# --- 2. 核心工具函數 ---
-def clean_text(text):
-    if not text: return ""
-    return str(text).encode('utf-8', 'ignore').decode('utf-8').strip()
+# --- 2. 核心逻辑工具 ---
+class SOP_Manager:
+    @staticmethod
+    def clean(text):
+        if not text: return ""
+        return str(text).encode('utf-8', 'ignore').decode('utf-8').strip()
 
-def safe_keyword_cut(raw_text, limit=245):
-    clean_words = re.findall(r'\b[a-z0-9]{2,}\b', raw_text.lower())
-    unique_words = []
-    seen = set()
-    current_length = 0
-    for w in clean_words:
-        if w not in seen:
-            new_len = current_length + len(w) + (1 if current_length > 0 else 0)
-            if new_len <= limit:
-                unique_words.append(w)
+    @staticmethod
+    def format_st(raw, pool):
+        """关键词规则：仅空格分隔，不含标点"""
+        clean = re.sub(r'[^a-zA-Z0-9\s]', ' ', f"{raw} {pool}".lower())
+        words = []
+        seen = set()
+        for w in clean.split():
+            if w not in seen and len(w) > 1:
+                words.append(w)
                 seen.add(w)
-                current_length = new_len
-            else:
-                break
-    return " ".join(unique_words)
+        return " ".join(words)[:245]
 
-def reset_cell(cell, bold=False):
-    cell.font = Font(name='Arial', size=10, bold=bold)
-    cell.alignment = Alignment(wrap_text=True, vertical='top')
+    @staticmethod
+    def process_img(file):
+        """压缩图片减少传输压力"""
+        img = Image.open(file)
+        img.thumbnail((500, 500))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=60)
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-def process_img_fast(file):
-    img = Image.open(file)
-    img.thumbnail((600, 600))
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=65)
-    return base64.b64encode(buf.getvalue()).decode('utf-8')
-
-# --- 3. 主界面 ---
-st.title("⚡ 亞馬遜 AI 精細化填充 V7.1 (穩定加固版)")
+# --- 3. 界面布局 ---
+st.title("🛡️ 亞馬遜規格終極鎖定 V7.2")
 
 with st.sidebar:
-    brand_name = st.text_input("Brand Name", value="AMAZING WALL")
+    brand = st.text_input("Brand Name", value="AMAZING WALL")
     st.divider()
-    st.subheader("變體尺寸與定價")
+    st.subheader("尺寸與定價配置")
     default_df = pd.DataFrame([
         {"Size": '16x24"', "Price": "12.99"},
         {"Size": '24x36"', "Price": "19.99"},
@@ -56,125 +52,117 @@ with st.sidebar:
     ])
     size_price_data = st.data_editor(default_df, num_rows="dynamic")
 
-uploaded_imgs = st.file_uploader("🖼️ 批量圖片 (檔名為 SKU 前綴)", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
-user_all_kw = st.text_area("📝 關鍵詞庫 (Search Terms Pool)", height=150)
-uploaded_tpl = st.file_uploader("📂 上傳模板 Excel", type=['xlsx', 'xlsm'])
+# 关键改动：给 file_uploader 增加唯一的 key，防止组件状态死锁
+uploaded_imgs = st.file_uploader("🖼️ 上传图片", type=["jpg", "png", "jpeg"], accept_multiple_files=True, key="img_uploader")
+user_kw = st.text_area("📝 关键词词库", height=100)
+uploaded_tpl = st.file_uploader("📂 上传模板", type=['xlsx', 'xlsm'], key="tpl_uploader")
 
-# --- 4. 執行處理 (優化為更穩定的循環邏輯) ---
-if st.button("🚀 啟動優化填充", use_container_width=True):
+# --- 4. 核心处理逻辑 ---
+if st.button("🚀 启动自动化填充", use_container_width=True, key="start_btn"):
     if not uploaded_imgs or not uploaded_tpl or not api_key:
-        st.error("❌ 缺失必要條件：請檢查圖片、模板或 API Key。")
+        st.error("❌ 启动失败：请确保图片、模板已上传，且 API Key 已配置。")
     else:
         try:
-            # 初始化數據
-            all_results = []
+            status = st.empty()
+            progress = st.progress(0)
+            
+            # 1. 初始化模板
             wb = openpyxl.load_workbook(uploaded_tpl, keep_vba=True)
             sheet = wb.active
-            h = {str(c.value).strip().lower().replace(" ", ""): c.column for r in sheet.iter_rows(min_row=1, max_row=3) for c in r if c.value}
-            bp_cols = [c.column for r in sheet.iter_rows(min_row=1, max_row=3) for c in r if "keyproductfeatures" in str(c.value).lower().replace(" ", "")]
+            h = {str(c.value).strip().lower().replace(" ", ""): c.column for r in sheet.iter_rows(max_row=3) for c in r if c.value}
+            bp_cols = [c.column for r in sheet.iter_rows(max_row=3) for c in r if "keyproductfeatures" in str(c.value).lower().replace(" ", "")]
             
+            client = OpenAI(api_key=api_key)
+            all_results = []
+            
+            # 2. 串行 AI 分析
+            for i, img_file in enumerate(uploaded_imgs):
+                prefix = os.path.splitext(img_file.name)[0]
+                status.info(f"正在分析款式 ({i+1}/{len(uploaded_imgs)}): {prefix}")
+                
+                # 图片指针重置，防止读取为空
+                img_file.seek(0)
+                b64 = SOP_Manager.process_img(img_file)
+                
+                prompt = "Analyze art. JSON: {'title':'','desc':'','bp':['','','','',''],'keywords':'','color':''}"
+                res = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}],
+                    response_format={"type":"json_object"}
+                )
+                all_results.append({"prefix": prefix, "data": json.loads(res.choices[0].message.content)})
+                progress.progress((i + 1) / len(uploaded_imgs))
+
+            # 3. 计算父类 SKU 范围
+            pfx_list = [r["prefix"] for r in all_results]
+            if len(pfx_list) > 1:
+                nums = [int(re.findall(r'\d+', p)[-1]) for p in pfx_list if re.findall(r'\d+', p)]
+                base = pfx_list[0].rsplit('-', 1)[0] if '-' in pfx_list[0] else pfx_list[0]
+                p_sku_total = f"{base}-{min(nums):02d}-{max(nums):02d}" if nums else pfx_list[0]
+            else:
+                p_sku_total = pfx_list[0]
+
+            # 4. 写入数据
+            status.info("📝 正在按照规格写入 Excel...")
             curr_row = 5
             parent_row = 4
             t = datetime.now()
             s_start, s_end = (t-timedelta(days=1)).strftime('%Y-%m-%d'), (t+timedelta(days=365)).strftime('%Y-%m-%d')
-            client = OpenAI(api_key=api_key)
 
-            # --- 第一階段：逐一分析圖片 (串行處理更穩定) ---
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            for i, img_file in enumerate(uploaded_imgs):
-                prefix = os.path.splitext(img_file.name)[0]
-                status_text.text(f"正在分析款式 ({i+1}/{len(uploaded_imgs)}): {prefix}")
-                
-                try:
-                    b64 = process_img_fast(img_file)
-                    prompt = f"Amazon Listing Expert. Analyze art pattern. Return JSON: {{'title':'','desc':'','bp':['','','','',''],'keywords':'','color':''}}. Pool: {user_all_kw}"
-                    res = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}],
-                        response_format={"type":"json_object"},
-                        timeout=30
-                    )
-                    data = json.loads(res.choices[0].message.content)
-                    all_results.append({"prefix": prefix, "data": data})
-                except Exception as ai_err:
-                    st.warning(f"⚠️ 款式 {prefix} 分析失敗，已跳過。錯誤: {ai_err}")
-                
-                progress_bar.progress((i + 1) / len(uploaded_imgs))
-
-            # --- 第二階段：計算父類 SKU 範圍 ---
-            valid_pfxs = [r["prefix"] for r in all_results if r["data"]]
-            if not valid_pfxs:
-                st.error("❌ 所有圖片分析均失敗，請檢查網路或 API。")
-                st.stop()
-
-            if len(valid_pfxs) > 1:
-                nums = [int(re.findall(r'\d+', p)[-1]) for p in valid_pfxs if re.findall(r'\d+', p)]
-                base_part = valid_pfxs[0].rsplit('-', 1)[0] if '-' in valid_pfxs[0] else valid_pfxs[0]
-                p_sku_total = f"{base_part}-{min(nums):02d}-{max(nums):02d}" if nums else valid_pfxs[0]
-            else:
-                p_sku_total = valid_pfxs[0]
-
-            # --- 第三階段：寫入 Excel ---
-            status_text.text("正在將數據寫入表格...")
-            
-            # 1. 填充父體行
-            first_data = all_results[0]["data"]
-            def fill_row(r_idx, k, v):
+            def fill(r, k, v):
                 target = k.lower().replace(" ", "")
-                if target in h: reset_cell(sheet.cell(row=r_idx, column=h[target], value=clean_text(v)))
+                if target in h:
+                    cell = sheet.cell(row=r, column=h[target], value=SOP_Manager.clean(v))
+                    cell.font = Font(name='Arial', size=10)
+                    cell.alignment = Alignment(wrap_text=True, vertical='top')
 
-            fill_row(parent_row, "sellersku", p_sku_total)
-            fill_row(parent_row, "parentage", "parent")
-            fill_row(parent_row, "productname", f"{brand_name} {first_data.get('title','')}"[:199])
-            fill_row(parent_row, "generickeyword", safe_keyword_cut(f"{first_data.get('color','')} {first_data.get('keywords','')} {user_all_kw}"))
-            fill_row(parent_row, "productdescription", first_data.get('desc',''))
-            # 第一行 (父體) 鎖定不填：Parent SKU, Color, Color Map
-            fill_row(parent_row, "parentsku", "")
-            fill_row(parent_row, "color", "")
-            fill_row(parent_row, "colormap", "")
-            for b_i, c_idx in enumerate(bp_cols[:5]):
-                if b_i < len(first_data.get('bp', [])):
-                    reset_cell(sheet.cell(row=parent_row, column=c_idx, value=clean_text(first_data['bp'][b_i])))
+            # --- A. 填充第一行 (父类行) ---
+            first = all_results[0]["data"]
+            fill(parent_row, "sellersku", p_sku_total)
+            fill(parent_row, "parentage", "parent")
+            fill(parent_row, "productname", f"{brand} {first.get('title','')}"[:199])
+            fill(parent_row, "generickeyword", SOP_Manager.format_st(f"{first.get('color','')} {first.get('keywords','')}", user_kw))
+            fill(parent_row, "productdescription", first.get('desc',''))
+            # 规格：第一行 Parent SKU, Color, Color Map 必填为空
+            fill(parent_row, "parentsku", "")
+            fill(parent_row, "color", "")
+            fill(parent_row, "colormap", "")
+            for b_idx, c_col in enumerate(bp_cols[:5]):
+                fill(parent_row, f"bullet_{b_idx}", first['bp'][b_idx] if b_idx < len(first['bp']) else "")
 
-            # 2. 循環填充子體
+            # --- B. 填充子类行 ---
             for res in all_results:
                 pfx, data = res["prefix"], res["data"]
-                pattern = data.get('color', 'Modern')
-                st_val = safe_keyword_cut(f"{pattern} {data.get('keywords','')} {user_all_kw}")
-                bt = f"{brand_name} {data.get('title','')}"
-                full_color = f"{pattern} {data.get('keywords','')}"
-
+                st_val = SOP_Manager.format_st(f"{data.get('color','')} {data.get('keywords','')}", user_kw)
+                
                 for _, s_row in size_price_data.iterrows():
-                    sz, pr = str(s_row["Size"]), str(s_row["Price"])
+                    sz = str(s_row["Size"])
+                    pr = str(s_row["Price"])
                     sz_tag = sz.replace('"', '').replace(' ', '')
-                    c_sku = f"{pfx}-{sz_tag}"
+                    c_sku = f"{pfx}-{sz_tag}" # 规格：前缀-尺寸
                     
-                    fill_row(curr_row, "sellersku", c_sku)
-                    fill_row(curr_row, "parentsku", p_sku_total)
-                    fill_row(curr_row, "parentage", "child")
-                    fill_row(curr_row, "productname", f"{bt} - {sz}"[:199])
-                    fill_row(curr_row, "size", sz)
-                    fill_row(curr_row, "sizemap", sz)
-                    fill_row(curr_row, "color", full_color)
-                    fill_row(curr_row, "colormap", full_color)
-                    fill_row(curr_row, "standardprice", pr)
-                    fill_row(curr_row, "saleprice", pr)
-                    fill_row(curr_row, "salestartdate", s_start)
-                    fill_row(curr_row, "saleenddate", s_end)
-                    fill_row(curr_row, "generickeyword", st_val)
-                    fill_row(curr_row, "productdescription", data.get('desc',''))
+                    fill(curr_row, "sellersku", c_sku)
+                    fill(curr_row, "parentsku", p_sku_total)
+                    fill(curr_row, "parentage", "child")
+                    fill(curr_row, "productname", f"{brand} {data.get('title','')} - {sz}"[:199])
+                    fill(curr_row, "size", sz)
+                    fill(curr_row, "sizemap", sz)
+                    fill(curr_row, "color", f"{data.get('color','')} {data.get('keywords','')}")
+                    fill(curr_row, "colormap", f"{data.get('color','')} {data.get('keywords','')}")
+                    fill(curr_row, "standardprice", pr)
+                    fill(curr_row, "salestartdate", s_start)
+                    fill(curr_row, "saleenddate", s_end)
+                    fill(curr_row, "generickeyword", st_val)
                     
-                    for b_i, c_idx in enumerate(bp_cols[:5]):
-                        if b_i < len(data.get('bp', [])):
-                            reset_cell(sheet.cell(row=curr_row, column=c_idx, value=clean_text(data['bp'][b_i])))
+                    for b_idx, c_col in enumerate(bp_cols[:5]):
+                        if b_idx < len(data['bp']):
+                            sheet.cell(row=curr_row, column=c_col, value=SOP_Manager.clean(data['bp'][b_idx]))
                     curr_row += 1
 
-            status_text.text("✅ 处理完成！")
-            output = io.BytesIO()
-            wb.save(output)
-            st.download_button("💾 下載 V7.1 穩定版", output.getvalue(), "Amazon_V7.1_Fixed.xlsm", use_container_width=True)
-            
+            status.success("✅ 处理完成！")
+            out = io.BytesIO()
+            wb.save(out)
+            st.download_button("💾 点击下载 V7.2 锁定版", out.getvalue(), "Amazon_V7.2_Fixed.xlsm", use_container_width=True)
+
         except Exception as e:
-            st.error(f"❌ 程序崩潰: {e}")
+            st.error(f"❌ 运行报错: {str(e)}")
