@@ -2,150 +2,124 @@ import streamlit as st
 import pandas as pd
 import io, base64, json, re, openpyxl
 from openai import OpenAI
-from openpyxl.styles import Font, Alignment
 
-# --- 1. 核心安全工具 (物理隔離佔位詞，解決圖 7d03/7b01 問題) ---
-def safe_clean_final(text):
+# --- 1. 核心过滤工具 (物理剔除占位符) ---
+def final_clean(text):
     if not text: return ""
-    # 物理剔除 JSON 符號和 AI 佔位詞
+    # 移除 JSON 括号和引号
     text = re.sub(r"[\[\]'\"']", "", str(text))
-    blacklist = ['word1', 'word2', 'fake', 'placeholder', 'detailed', 'rich', 'title']
+    # 物理过滤黑名单占位词
+    blacklist = {'word1', 'word2', 'fake', 'placeholder', 'detailed', 'rich'}
     words = text.split()
     return " ".join([w for w in words if w.lower() not in blacklist]).strip()
 
-# --- 2. 頁面強制重置配置 ---
-st.set_page_config(page_title="亞馬遜 V11.8 終極穩定版", layout="wide")
+# --- 2. 页面配置 ---
+st.set_page_config(page_title="亞馬遜 V12.0 穩定版", layout="wide")
 api_key = st.secrets.get("OPENAI_API_KEY") or ""
 
-# --- 3. 側邊欄：規格鎖定 ---
+# --- 3. 规格配置 ---
 with st.sidebar:
-    st.header("⚙️ 規格鎖定配置")
-    brand = st.text_input("品牌名稱", value="AMAZING WALL")
-    st.divider()
-    # 恢復您確認的尺寸與價格介面
-    s1, p1, n1 = st.text_input("尺寸 1", "16x24\""), st.text_input("價格 1", "12.99"), "001"
-    s2, p2, n2 = st.text_input("尺寸 2", "24x36\""), st.text_input("價格 2", "16.99"), "002"
-    s3, p3, n3 = st.text_input("尺寸 3", "32x48\""), st.text_input("價格 3", "19.99"), "003"
+    brand = st.text_input("品牌", value="AMAZING WALL")
+    s1, p1 = st.text_input("尺寸1", "16x24\""), st.text_input("价格1", "12.99")
+    s2, p2 = st.text_input("尺寸2", "24x36\""), st.text_input("价格2", "16.99")
+    s3, p3 = st.text_input("尺寸3", "32x48\""), st.text_input("价格3", "19.99")
 
-# --- 4. 款式錄入 (使用唯一 Key 解決圖 f201 死鎖) ---
-st.header("🖼️ 款式錄入矩陣 (V11.8)")
-if 'total_rows' not in st.session_state: st.session_state.total_rows = 1
-
-sku_data_list = []
-for i in range(st.session_state.total_rows):
+# --- 4. 款式录入 ---
+if 'rows' not in st.session_state: st.session_state.rows = 1
+items = []
+for i in range(st.session_state.rows):
     with st.expander(f"款式 {i+1}", expanded=True):
         c1, c2, c3 = st.columns(3)
         with c1:
-            pfx = st.text_input("SKU 前綴", key=f"pfx_v118_{i}") # 使用新 Key 强制重置组件
-            img = st.file_uploader("分析圖 (必傳)", key=f"img_v118_{i}")
+            pfx = st.text_input("SKU前缀", key=f"pfx_{i}")
+            img = st.file_uploader("分析图", key=f"img_{i}")
         with c2:
-            m_u = st.text_input("主圖 URL", key=f"mu_v118_{i}")
-            o_u = st.text_area("附圖集 (一行一個)", key=f"ou_v118_{i}")
+            m_u = st.text_input("主图URL", key=f"mu_{i}")
+            o_u = st.text_area("附图集", key=f"ou_{i}")
         with c3:
-            u1 = st.text_input(f"{s1} 圖片", key=f"u1_v118_{i}")
-            u2 = st.text_input(f"{s2} 圖片", key=f"u2_v118_{i}")
-            u3 = st.text_input(f"{s3} 圖片", key=f"u3_v118_{i}")
-        sku_data_list.append({"pfx": pfx, "img": img, "main": m_u, "sz_urls": [u1, u2, u3]})
+            u1, u2, u3 = st.text_input("S1图", key=f"u1_{i}"), st.text_input("S2图", key=f"u2_{i}"), st.text_input("S3图", key=f"u3_{i}")
+        items.append({"pfx": pfx, "img": img, "main": m_u, "sz_urls": [u1, u2, u3]})
 
-if st.button("➕ 增加新款式"):
-    st.session_state.total_rows += 1
+if st.button("➕ 增加款式"):
+    st.session_state.rows += 1
     st.rerun()
 
-user_keywords = st.text_area("通用詞庫 (Search Terms)")
-# 增加 Key，防止模板讀取死鎖
-uploaded_template = st.file_uploader("📂 第一步：上傳 Amazon 模板", type=['xlsx', 'xlsm'], key="tpl_v118")
+user_kw = st.text_area("通用词库")
+tpl_file = st.file_uploader("📂 上传模板", type=['xlsx', 'xlsm'], key="tpl_v12")
 
-# --- 5. 核心執行邏輯 (鎖定第一行與子類 SKU) ---
-if st.button("🚀 啟動自動化填充 (物理重置版)", type="primary", key="run_v118"):
-    if not uploaded_template or not api_key:
-        st.error("❌ 啟動失敗：請確保已上傳模板並配置 API Key")
+# --- 5. 核心逻辑：解决红框与空行 ---
+if st.button("🚀 启动自动化填充", type="primary"):
+    if not tpl_file or not api_key:
+        st.error("请检查模板与 API 配置")
     else:
         try:
-            status_log = st.empty()
-            status_log.info("⏳ 正在讀取模板表頭...")
-            
-            # 解決 FileNotFoundError：直接從內存加載
-            wb = openpyxl.load_workbook(uploaded_template, keep_vba=True)
+            wb = openpyxl.load_workbook(tpl_file, keep_vba=True)
             sheet = wb.active
-            # 建立表頭索引
             h = {str(c.value).strip().lower().replace(" ", ""): c.column for r in sheet.iter_rows(max_row=3) for c in r if c.value}
-            bp_cols = [c.column for r in sheet.iter_rows(max_row=3) for c in r if "keyproductfeatures" in str(c.value).lower().replace(" ", "")]
             
             client = OpenAI(api_key=api_key)
-            current_write_row = 5 # 子類從第 5 行開始
+            curr_row = 5 # 子体从第5行开始
 
-            for idx, item in enumerate(sku_data_list):
-                if not item["pfx"] or not item["img"]:
-                    continue
+            for idx, item in enumerate(items):
+                if not item["pfx"] or not item["img"]: continue
                 
-                status_log.info(f"⏳ 正在分析款式 {idx+1}: {item['pfx']}...")
-                
-                # 圖像重置指針，解決圖 5c2b 的 'file' 報錯
+                # 修复图 5c2b：文件流指针重置
                 item["img"].seek(0)
-                b64_img = base64.b64encode(item["img"].read()).decode('utf-8')
-                
+                b64 = base64.b64encode(item["img"].read()).decode('utf-8')
                 res = client.chat.completions.create(
                     model="gpt-4o-mini",
-                    messages=[{"role":"user","content":[{"type":"text","text":"Analyze art JSON: {'title':'','elements':'','color':'','bp':['','','','','']}"},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64_img}"}}]}],
+                    messages=[{"role":"user","content":[{"type":"text","text":"Analyze art JSON: {'title':'','elements':'','color':'','bp':['','','','','']}"},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}],
                     response_format={"type":"json_object"}
                 )
-                ai_data = json.loads(res.choices[0].message.content)
+                ai = json.loads(res.choices[0].message.content)
 
-                # 規則鎖定：Parent SKU 範圍命名
-                parent_sku = f"{item['pfx']}-{n1}-{n3}"
+                # 规则锁定：Parent SKU 命名
+                p_sku = f"{item['pfx']}" # 假设单款式
                 
-                # 定義 1 父 + 3 子 結構，解決圖 c9d4/0976 SKU 混亂
-                rows_to_process = [
-                    {"type": "P", "sku": parent_sku, "sz": "", "pr": "", "id": -1},
-                    {"type": "C", "sku": f"{item['pfx']}-{n1}", "sz": s1, "pr": p1, "id": 0},
-                    {"type": "C", "sku": f"{item['pfx']}-{n2}", "sz": s2, "pr": p2, "id": 1},
-                    {"type": "C", "sku": f"{item['pfx']}-{n3}", "sz": s3, "pr": p3, "id": 2}
+                # 写入 1父 + 3子
+                data_map = [
+                    {"type": "P", "sku": p_sku, "sz": "", "pr": ""},
+                    {"type": "C", "sku": f"{item['pfx']}-{s1.replace('\"','')}", "sz": s1, "pr": p1, "id": 0},
+                    {"type": "C", "sku": f"{item['pfx']}-{s2.replace('\"','')}", "sz": s2, "pr": p2, "id": 1},
+                    {"type": "C", "sku": f"{item['pfx']}-{s3.replace('\"','')}", "sz": s3, "pr": p3, "id": 2}
                 ]
 
-                for r in rows_to_process:
-                    # 鎖定：父體行永遠寫在第 4 行 (Row 4)，解決圖 c9d4 紅框缺失
-                    target_row = 4 if r["type"] == "P" else current_write_row
+                for row in data_map:
+                    # 锁定：父体行强制写入 Row 4，解决红框缺失
+                    target_row = 4 if row["type"] == "P" else curr_row
                     
-                    def fill_sheet(key_name, val_content):
-                        match_cols = [col_idx for name, col_idx in h.items() if key_name.lower().replace(" ", "") in name]
-                        if match_cols:
-                            cell = sheet.cell(row=target_row, column=match_cols[0], value=safe_clean_final(val_content))
-                            cell.font = Font(name='Arial', size=10)
-                            cell.alignment = Alignment(wrap_text=True, vertical='top')
+                    def fill(k, v):
+                        targets = [i for name, i in h.items() if k.lower().replace(" ", "") in name]
+                        if targets: sheet.cell(row=target_row, column=targets[0], value=final_clean(v))
 
-                    # 1. 強制寫入 Seller SKU
-                    fill_sheet("sellersku", r["sku"])
-                    fill_sheet("parentsku", parent_sku)
+                    fill("sellersku", row["sku"])
+                    fill("parentsku", p_sku)
                     
-                    # 2. 屬性鏡像鎖定 (ColorMap = Color)，解決圖 71d5 缺失
-                    if r["type"] == "C":
-                        full_color_desc = f"{ai_data.get('color','')} {ai_data.get('elements','')}"
-                        fill_sheet("color", full_color_desc)
-                        fill_sheet("colormap", full_color_desc)
-                        fill_sheet("size", r["sz"])
-                        fill_sheet("sizemap", r["sz"])
-                        fill_sheet("standardprice", r["pr"])
+                    # 属性镜像同步 (Color = Color Map)
+                    if row["type"] == "C":
+                        full_color = f"{ai.get('color','')} {ai.get('elements','')}"
+                        fill("color", full_color)
+                        fill("colormap", full_color)
+                        fill("size", row["sz"])
+                        fill("sizemap", row["sz"])
+                        fill("standardprice", row["pr"])
 
-                    # 3. 標題與文案 (自動補齊 5 點，解決圖 285b 缺失)
-                    title_full = f"{brand} {ai_data.get('title','')} {ai_data.get('elements','')}"
-                    if r["type"] == "C": title_full += f" - {r['sz']}"
-                    fill_sheet("productname", title_full[:199])
-                    
-                    # 4. 關鍵詞格式化，解決圖 7d03 佔位詞
-                    fill_sheet("generickeyword", safe_clean_final(f"{ai_data.get('elements','')} {user_keywords}"))
+                    # 标题文案处理
+                    title = f"{brand} {ai.get('title','')} {ai.get('elements','')}"
+                    if row["type"] == "C": title += f" - {row['sz']}"
+                    fill("productname", title[:199])
+                    fill("generickeyword", final_clean(f"{ai.get('elements','')} {user_kw}"))
 
-                    # 5. 五點描述 (所有行必填)
-                    ai_bps = ai_data.get('bp', [])
-                    while len(ai_bps) < 5: ai_bps.append("High-quality professional print.")
-                    for b_i, b_col in enumerate(bp_cols[:5]):
-                        sheet.cell(row=target_row, column=b_col, value=safe_clean_final(ai_bps[b_i]))
+                    # 五点描述全覆盖
+                    for b_i in range(5):
+                        fill(f"keyproductfeatures{b_i+1}", ai['bp'][b_i] if b_i < len(ai['bp']) else "High-quality decor.")
 
-                    if r["type"] == "C": current_write_row += 1
+                    if row["type"] == "C": curr_row += 1
 
-            status_log.success("✅ 全部處理完成！請下載文件。")
-            output_stream = io.BytesIO()
-            wb.save(output_stream)
-            st.download_button("💾 下載 V11.8 終極鎖定版", output_stream.getvalue(), "Amazon_V11.8_Final.xlsm")
+            st.success("✅ 处理完成！")
+            out = io.BytesIO()
+            wb.save(out)
+            st.download_button("💾 点击下载修复版表格", out.getvalue(), "Final_Locked_V12.xlsm")
 
         except Exception as e:
-            st.error(f"❌ 程序報錯：{str(e)}")
+            st.error(f"严重报错：{e}")
