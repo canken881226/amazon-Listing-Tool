@@ -1,125 +1,195 @@
-import openpyxl
-import re
-import os
-from datetime import datetime, timedelta
+import streamlit as st
+import pandas as pd
+import io, base64, json, re, openpyxl
+from openai import OpenAI
+from openpyxl.styles import Font, Alignment
 
-# --- 1. 核心規則配置 ---
-# 品牌名稱與站點差異拼寫轉換
-BRAND_NAME = "AMAZING WALL"
-COLOR_TRANS = {"Gray": "Grey", "Black": "Black", "Blue": "Blue"} 
+# --- 1. 核心工具函數 (物理鎖定規則) ---
+def strict_clean(text):
+    if not text: return ""
+    # 移除 JSON 符號及 AI 佔位詞
+    text = re.sub(r"[\[\]'\"']", "", str(text))
+    blacklist = {'word1', 'word2', 'fake', 'placeholder', 'detailed'}
+    words = text.split()
+    return " ".join([w for w in words if w.lower() not in blacklist]).strip()
 
-class AmazonFixer:
-    @staticmethod
-    def clean_mojibake(text):
-        """規則：徹底修復亂碼、JSON 殘留及佔位符"""
-        if text is None: return ""
-        # 移除 JSON 符號
-        text = re.sub(r"[\[\]'\"']", "", str(text))
-        # 物理過濾佔位詞 (如 word1, fake 等)
-        blacklist = {'word1', 'word2', 'fake', 'placeholder', 'detailed', 'rich', 'title'}
-        words = text.split()
-        return " ".join([w for w in words if w.lower() not in blacklist]).strip()
+def format_kw_strict(raw_text):
+    """關鍵詞規則：僅空格分隔，限長 245"""
+    clean = re.sub(r'[^a-zA-Z0-9\s]', ' ', str(raw_text).lower())
+    seen, res = set(), []
+    for w in clean.split():
+        if w not in seen and len(w) > 1:
+            res.append(w)
+            seen.add(w)
+    return " ".join(res)[:245]
 
-    @staticmethod
-    def format_keywords(raw_text):
-        """規則：關鍵詞僅限空格分隔，嚴禁標點，限長 245 字符"""
-        if not raw_text: return ""
-        clean = re.sub(r'[^a-zA-Z0-9\s]', ' ', str(raw_text).lower())
-        words = []
-        seen = set()
-        for w in clean.split():
-            if w not in seen and len(w) > 1:
-                words.append(w)
-                seen.add(w)
-        return " ".join(words)[:245]
+# --- 2. 頁面配置 ---
+st.set_page_config(page_title="亞馬遜 AI 全能系統 V14.0", layout="wide")
+api_key = st.secrets.get("OPENAI_API_KEY") or ""
 
-def run_converter():
-    # 準備文件路徑
-    us_file = 'us.xlsx'  # 您的美國站已填表格
-    uk_tpl = 'uk.xlsx'   # 英國站空白模板
-    output_name = f'UK_Ready_{datetime.now().strftime("%m%d")}.xlsx'
+# --- 3. 功能導航 ---
+st.sidebar.title("🚀 功能導航")
+mode = st.sidebar.radio("請選擇操作模式：", ["批量上架 (圖片分析)", "站點搬運 (US ➔ UK)"])
 
-    if not os.path.exists(us_file) or not os.path.exists(uk_tpl):
-        print("❌ 錯誤：請確保文件夾內有 us.xlsx 和 uk.xlsx")
-        return
+# ==========================================
+# 模式一：批量上架 (保持原有邏輯不動)
+# ==========================================
+if mode == "批量上架 (圖片分析)":
+    st.header("🎨 AI 視覺分析上架模塊")
+    
+    with st.sidebar:
+        st.subheader("⚙️ 規格鎖定")
+        brand = st.text_input("品牌名稱", value="AMAZING WALL", key="v14_brand")
+        s1, p1, n1 = st.text_input("尺寸 1", "16x24\"", key="s1"), st.text_input("價格 1", "12.99", key="p1"), "001"
+        s2, p2, n2 = st.text_input("尺寸 2", "24x36\"", key="s2"), st.text_input("價格 2", "16.99", key="p2"), "002"
+        s3, p3, n3 = st.text_input("尺寸 3", "32x48\"", key="s3"), st.text_input("價格 3", "19.99", key="p3"), "003"
 
-    print("⏳ 正在加載數據...")
-    # data_only=True 讀取數值而非公式
-    us_wb = openpyxl.load_workbook(us_file, data_only=True)
-    us_sheet = us_wb.active
-    uk_wb = openpyxl.load_workbook(uk_tpl, keep_vba=True)
-    uk_sheet = uk_wb.active
+    if 'v14_rows' not in st.session_state: st.session_state.v14_rows = 1
+    sku_inputs = []
+    for i in range(st.session_state.v14_rows):
+        with st.expander(f"款式 {i+1}", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                pfx = st.text_input("SKU 前綴", key=f"v14_pfx_{i}")
+                img = st.file_uploader("分析圖", key=f"v14_img_{i}")
+            with c2:
+                mu = st.text_input("主圖 URL", key=f"v14_mu_{i}")
+                ou = st.text_area("附圖集", key=f"v14_ou_{i}")
+            with c3:
+                u1 = st.text_input(f"{s1} 圖", key=f"v14_u1_{i}")
+                u2 = st.text_input(f"{s2} 圖", key=f"v14_u2_{i}")
+                u3 = st.text_input(f"{s3} 圖", key=f"v14_u3_{i}")
+            sku_inputs.append({"pfx": pfx, "img": img, "main": mu, "sz_urls": [u1, u2, u3]})
 
-    # 建立表頭索引映射 (解決 US/UK 模板順序不一致)
-    # 假設表頭在第 3 行
-    us_h = {str(c.value).strip().lower().replace(" ", ""): c.column for c in us_sheet[3] if c.value}
-    uk_h = {str(c.value).strip().lower().replace(" ", ""): c.column for c in uk_sheet[3] if c.value}
+    if st.button("➕ 增加款式"):
+        st.session_state.v14_rows += 1
+        st.rerun()
 
-    # 定義跨站點對位地圖 (US 鍵 : UK 鍵)
-    transfer_map = {
-        "sellersku": "sellersku",
-        "parentsku": "parentsku",
-        "productname": "itemname",      # UK 站通常叫 item_name
-        "brandname": "brandname",
-        "productdescription": "productdescription",
-        "generickeyword": "searchterms", # US Keyword -> UK Search Terms
-        "color": "colour",              # 拼寫轉換
-        "colormap": "colourmap",
-        "size": "size",
-        "sizemap": "sizemap",
-        "standardprice": "standardprice",
-        "mainimageurl": "mainimageurl",
-        "otherimageurl1": "otherimageurl1"
-    }
+    user_kw = st.text_area("Search Terms 詞庫")
+    uploaded_tpl = st.file_uploader("📂 上傳 Amazon 模板", type=['xlsx', 'xlsm'], key="v14_tpl")
 
-    print("🚀 開始搬運數據並同步規格...")
-    # 從第 4 行開始遍歷所有數據
-    for row_idx in range(4, us_sheet.max_row + 1):
-        # 檢查 Seller SKU 是否存在，防止處理空行
-        sku_val = us_sheet.cell(row=row_idx, column=us_h.get('sellersku', 1)).value
-        if not sku_val: continue
+    if st.button("🚀 啟動 AI 填充", type="primary"):
+        if not uploaded_tpl or not api_key:
+            st.error("❌ 請上傳模板及配置 API Key")
+        else:
+            try:
+                wb = openpyxl.load_workbook(uploaded_tpl, keep_vba=True)
+                sheet = wb.active
+                h = {str(c.value).strip().lower().replace(" ", ""): c.column for r in sheet.iter_rows(max_row=3) for c in r if c.value}
+                bp_cols = [c.column for r in sheet.iter_rows(max_row=3) for c in r if "keyproductfeatures" in str(c.value).lower().replace(" ", "")]
+                client = OpenAI(api_key=api_key)
+                curr_row = 5
 
-        # A. 執行核心字段搬運
-        for us_key, uk_key in transfer_map.items():
-            u_col = us_h.get(us_key)
-            k_col = uk_h.get(uk_key)
-            
-            if u_col and k_col:
-                raw_val = us_sheet.cell(row=row_idx, column=u_col).value
-                clean_val = AmazonFixer.clean_mojibake(raw_val)
-                
-                # 特殊規則：如果是關鍵詞，執行嚴格格式化
-                if us_key == "generickeyword":
-                    clean_val = AmazonFixer.format_keywords(raw_val)
-                
-                # 寫入英國模板
-                uk_sheet.cell(row=row_idx, column=k_col, value=clean_val)
-        
-        # B. 搬運五點描述 (1-5點)
-        for i in range(1, 6):
-            us_bp = us_h.get(f"keyproductfeatures{i}") or us_h.get(f"bulletpoint{i}")
-            uk_bp = uk_h.get(f"bulletpoint{i}") or uk_h.get(f"keyproductfeatures{i}")
-            
-            if us_bp and uk_bp:
-                bp_val = us_sheet.cell(row=row_idx, column=us_bp).value
-                uk_sheet.cell(row=row_idx, column=uk_bp, value=AmazonFixer.clean_mojibake(bp_val))
+                for idx, item in enumerate(sku_inputs):
+                    if not item["pfx"] or not item["img"]: continue
+                    item["img"].seek(0)
+                    b64 = base64.b64encode(item["img"].read()).decode('utf-8')
+                    res = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role":"user","content":[{"type":"text","text":"Analyze art JSON: {'title':'','elements':'','color':'','bp':['','','','','']}"},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}],
+                        response_format={"type":"json_object"}
+                    )
+                    ai = json.loads(res.choices[0].message.content)
+                    p_sku = f"{item['pfx']}-{n1}-{n3}"
+                    
+                    rows_logic = [
+                        {"type": "P", "sku": p_sku, "sz": "", "pr": ""},
+                        {"type": "C", "sku": f"{item['pfx']}-{n1}", "sz": s1, "pr": p1},
+                        {"type": "C", "sku": f"{item['pfx']}-{n2}", "sz": s2, "pr": p2},
+                        {"type": "C", "sku": f"{item['pfx']}-{n3}", "sz": s3, "pr": p3}
+                    ]
 
-        # C. 規則補齊：確保第一行 (Parent 行) SKU 範圍正確
-        # 如果是 Parent 行，強制清空 Color 等欄位 (按您之前要求)
-        parentage_col = us_h.get("parentage")
-        if parentage_col:
-            parentage_val = str(us_sheet.cell(row=row_idx, column=parentage_col).value).lower()
-            if "parent" in parentage_val:
-                # 確保父行 Color/Color Map 留空
-                if uk_h.get("colour"): uk_sheet.cell(row=row_idx, column=uk_h["colour"], value="")
-                if uk_h.get("colourmap"): uk_sheet.cell(row=row_idx, column=uk_h["colourmap"], value="")
+                    for r_data in rows_logic:
+                        target_row = 4 if r_data["type"] == "P" else curr_row
+                        def fill(k, v):
+                            target = [col for name, col in h.items() if k.lower().replace(" ", "") in name]
+                            if target:
+                                cell = sheet.cell(row=target_row, column=target[0], value=strict_clean(v))
+                                cell.font = Font(name='Arial', size=10)
 
-    # 存檔
-    uk_wb.save(output_name)
-    print(f"✅ 成功！文件已生成：{output_name}")
+                        fill("sellersku", r_data["sku"])
+                        fill("parentsku", p_sku)
+                        if r_data["type"] == "C":
+                            color_v = f"{ai.get('color','')} {ai.get('elements','')}"
+                            fill("color", color_v)
+                            fill("colormap", color_v)
+                            fill("size", r_data["sz"])
+                            fill("sizemap", r_data["sz"])
+                            fill("standardprice", r_data["pr"])
+                        
+                        fill("productname", f"{brand} {ai.get('title','')} {ai.get('elements','')}"[:199])
+                        fill("generickeyword", format_kw_strict(f"{ai.get('elements','')} {user_kw}"))
+                        for i in range(5):
+                            fill(f"keyproductfeatures{i+1}", ai['bp'][i] if i < len(ai['bp']) else "")
 
-if __name__ == "__main__":
-    try:
-        run_converter()
-    except Exception as e:
-        print(f"❌ 運行出錯：{e}")
+                        if r_data["type"] == "C": curr_row += 1
+
+                st.success("✅ AI 分析填充完成！")
+                out = io.BytesIO()
+                wb.save(out)
+                st.download_button("💾 下載 AI 生成表格", out.getvalue(), "Amazon_US_AI.xlsm")
+            except Exception as e:
+                st.error(f"❌ 錯誤: {e}")
+
+# ==========================================
+# 模式二：站點搬運 (單獨功能)
+# ==========================================
+elif mode == "站點搬運 (US ➔ UK)":
+    st.header("🌍 跨站點數據自動搬運 (US ➔ UK)")
+    st.info("此功能會將您已填好的美國站文件數據，原封不動搬運到英國站模板中。")
+
+    col_us, col_uk = st.columns(2)
+    with col_us:
+        us_file = st.file_uploader("📂 1. 上傳已填寫的美國站表格 (US)", type=['xlsx', 'xlsm'], key="us_move")
+    with col_uk:
+        uk_tpl = st.file_uploader("📂 2. 上傳空白的英國站模板 (UK)", type=['xlsx', 'xlsm'], key="uk_move")
+
+    if st.button("🚀 執行站點搬運", type="primary"):
+        if not us_file or not uk_tpl:
+            st.error("❌ 請同時上傳兩個站點的文件")
+        else:
+            try:
+                # 讀取 US 數據
+                us_wb = openpyxl.load_workbook(us_file, data_only=True)
+                us_sheet = us_wb.active
+                # 讀取 UK 模板
+                uk_wb = openpyxl.load_workbook(uk_tpl, keep_vba=True)
+                uk_sheet = uk_wb.active
+
+                # 表頭索引映射
+                us_h = {str(c.value).strip().lower().replace(" ", ""): c.column for c in us_sheet[3] if c.value}
+                uk_h = {str(c.value).strip().lower().replace(" ", ""): c.column for c in uk_sheet[3] if c.value}
+
+                # 對位邏輯
+                mapping = {
+                    "sellersku": "sellersku", "parentsku": "parentsku",
+                    "productname": "itemname", "brandname": "brandname",
+                    "productdescription": "productdescription",
+                    "generickeyword": "searchterms", "color": "colour",
+                    "colormap": "colourmap", "size": "size", "sizemap": "sizemap",
+                    "standardprice": "standardprice", "mainimageurl": "mainimageurl"
+                }
+
+                # 循環搬運
+                for r_idx in range(4, us_sheet.max_row + 1):
+                    sku_check = us_sheet.cell(row=r_idx, column=us_h.get('sellersku', 1)).value
+                    if not sku_check: continue
+
+                    for us_k, uk_k in mapping.items():
+                        if us_k in us_h and uk_k in uk_h:
+                            val = us_sheet.cell(row=r_idx, column=us_h[us_k]).value
+                            uk_sheet.cell(row=r_idx, column=uk_h[uk_k], value=strict_clean(val))
+                    
+                    # 搬運五點
+                    for i in range(1, 6):
+                        u_col = us_h.get(f"keyproductfeatures{i}") or us_h.get(f"bulletpoint{i}")
+                        k_col = uk_h.get(f"bulletpoint{i}") or uk_h.get(f"keyproductfeatures{i}")
+                        if u_col and k_col:
+                            uk_sheet.cell(row=r_idx, column=k_col, value=us_sheet.cell(row=r_idx, column=u_col).value)
+
+                st.success("✅ 站點數據搬運成功！")
+                out_uk = io.BytesIO()
+                uk_wb.save(out_uk)
+                st.download_button("💾 下載英國站轉換文件", out_uk.getvalue(), "Amazon_UK_Transfer.xlsm")
+            except Exception as e:
+                st.error(f"❌ 搬運失敗: {e}")
