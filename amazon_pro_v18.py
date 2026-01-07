@@ -33,11 +33,11 @@ def format_amazon_kw(elements, global_kws):
     return " ".join(res)
 
 # --- 2. 頁面配置 ---
-st.set_page_config(page_title="亞馬遜專家 V47", layout="wide")
+st.set_page_config(page_title="亞馬遜專家 V48", layout="wide")
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY") or ""
 
-st.title("🔥 亞馬遜 AI 批量上架系統 V47")
-st.success("✅ 已解鎖：靈活尺寸數量配置 + 全局父類架構 + 固定字段動態複製。")
+st.title("🔥 亞馬遜 AI 批量上架系統 V48")
+st.success("✅ 專項修復：已解決 'got int' 列名讀取報錯，確保 1.3MB 模板穩定加載。")
 
 # --- 3. 側邊欄：動態尺寸與全局配置 ---
 if 'size_count' not in st.session_state: st.session_state.size_count = 3
@@ -67,10 +67,10 @@ with st.sidebar:
             st.rerun()
 
 # --- 4. 款式管理 ---
-if 'v47_rows' not in st.session_state: st.session_state.v47_rows = 1
+if 'v48_rows' not in st.session_state: st.session_state.v48_rows = 1
 sku_items = []
 st.subheader("📦 待上架款式列表")
-for i in range(st.session_state.v47_rows):
+for i in range(st.session_state.v48_rows):
     with st.expander(f"款式 #{i+1} 配置", expanded=True):
         col_a, col_b, col_c = st.columns([1.2, 1, 1.5])
         with col_a:
@@ -81,27 +81,33 @@ for i in range(st.session_state.v47_rows):
         sku_items.append({"pfx": pfx, "img": img, "main": m_url, "others": o_urls})
 
 if st.button("➕ 增加一個款式"):
-    st.session_state.v47_rows += 1
+    st.session_state.v48_rows += 1
     st.rerun()
 
 st.divider()
 tpl_file = st.file_uploader("📂 上傳 Amazon 模板", type=['xlsx', 'xlsm'])
 
 # --- 5. 執行填充 ---
-if st.button("🚀 啟動 V47 批量填充", type="primary") and tpl_file and api_key:
-    with st.spinner('AI 正在構建動態架構並填充...'):
+if st.button("🚀 啟動 V48 批量填充", type="primary") and tpl_file and api_key:
+    with st.spinner('正在分析圖片並進行安全性校驗...'):
         try:
             wb = openpyxl.load_workbook(tpl_file, keep_vba=True)
             sheet = wb['Template'] if 'Template' in wb.sheetnames else wb.active
-            h = {re.sub(r'[^a-z0-9]', '', str(cell.value).lower()): cell.column for r in range(1, 6) for cell in sheet[r] if cell.value}
             
-            # 保存第 4 行固定字段
+            # --- 關鍵修復區：加入文字類型判斷，避免 'int' 報錯 ---
+            h = {}
+            for r in range(1, 6):
+                for cell in sheet[r]:
+                    # 只有當單元格內容為字串時才進行正則替換
+                    if cell.value and isinstance(cell.value, str):
+                        clean_n = re.sub(r'[^a-z0-9]', '', cell.value.lower())
+                        if clean_n: h[clean_n] = cell.column
+            # -----------------------------------------------------------
+            
             fixed_values = {col: sheet.cell(row=4, column=col).value for col in range(1, sheet.max_column + 1) if sheet.cell(row=4, column=col).value}
-
             valid_items = [item for item in sku_items if item["pfx"] and item["img"]]
             if not valid_items: st.error("❌ 請填寫完整信息！"); st.stop()
             
-            # 全局父類 SKU 計算
             indices = [re.search(r'\d+$', item["pfx"]).group() for item in valid_items if re.search(r'\d+$', item["pfx"])]
             if indices:
                 min_i, max_i = min(indices), max(indices)
@@ -116,19 +122,19 @@ if st.button("🚀 啟動 V47 批量填充", type="primary") and tpl_file and ap
             
             def fill(r, k_list, v):
                 for k in k_list:
-                    c_idx = h.get(re.sub(r'[^a-z0-9]', '', k.lower()))
+                    # 修復調用處也進行類型安全檢測
+                    target_k = re.sub(r'[^a-z0-9]', '', k.lower()) if isinstance(k, str) else ""
+                    c_idx = h.get(target_k)
                     if c_idx: sheet.cell(row=r, column=c_idx, value=clean_copy_text(v)); break
 
             def fill_fixed(r):
                 for col_idx, val in fixed_values.items():
                     if not sheet.cell(row=r, column=col_idx).value: sheet.cell(row=r, column=col_idx, value=val)
 
-            # A. 寫入全局父類行
             fill(row_cursor, ["sellersku"], global_parent_sku)
             fill(row_cursor, ["productname"], f"{brand} Collection {global_parent_sku.replace('-P','')}")
             fill_fixed(row_cursor); row_cursor += 1
 
-            # B. 遍歷款式與動態尺寸
             for item in valid_items:
                 item["img"].seek(0)
                 b64 = base64.b64encode(item["img"].read()).decode('utf-8')
@@ -139,7 +145,6 @@ if st.button("🚀 啟動 V47 批量填充", type="primary") and tpl_file and ap
                 )
                 ai = json.loads(res.choices[0].message.content)
                 
-                # 遍歷用戶自定義的尺寸矩陣
                 for sz_cfg in size_matrix:
                     fill_fixed(row_cursor)
                     fill(row_cursor, ["sellersku"], f"{item['pfx']}-{sz_cfg['size']}")
@@ -165,6 +170,6 @@ if st.button("🚀 啟動 V47 批量填充", type="primary") and tpl_file and ap
 
             out = io.BytesIO()
             wb.save(out)
-            st.success(f"✅ 生成完成！共處理 {len(valid_items)} 個款式，每個款式包含 {st.session_state.size_count} 個尺寸變體。")
-            st.download_button("💾 下載靈活批量文件", out.getvalue(), "Amazon_V47_Flexible.xlsm")
-        except Exception as e: st.error(f"❌ 錯誤: {e}")
+            st.success("✅ V48 生成完成！錯誤已修正。")
+            st.download_button("💾 下載修復版文件", out.getvalue(), "Amazon_V48_Fixed.xlsm")
+        except Exception as e: st.error(f"❌ 錯誤詳情: {e}")
