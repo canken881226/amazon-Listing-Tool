@@ -4,14 +4,12 @@ import io, base64, json, re, openpyxl, os, gc
 from openai import OpenAI
 from datetime import datetime, timedelta
 
-# --- 1. 核心工具 (物理防亂碼 & 類型安全) ---
+# --- 1. 核心工具 ---
 def clean_copy_text(text):
     if pd.isna(text) or str(text).strip() == "": return ""
-    # 物理清除 JSON 殘留
     t = str(text).replace('["', '').replace('"]', '').strip()
-    # 強制 ASCII 編碼過濾，移除所有可能導致 Excel 亂碼的特殊符號
+    # 物理過濾亂碼：只保留標準 ASCII 字符
     t = t.encode('ascii', 'ignore').decode('ascii')
-    # 移除不可見字符
     return "".join(c for c in t if ord(c) >= 32 or c in '\n\r\t')
 
 def deduplicate_title(title):
@@ -37,13 +35,13 @@ def format_amazon_kw(elements, global_kws):
     return " ".join(res)
 
 # --- 2. 頁面配置 ---
-st.set_page_config(page_title="亞馬遜專家 V57", layout="wide")
+st.set_page_config(page_title="亞馬遜專家 V58", layout="wide")
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY") or ""
 
-st.title("🔥 亞馬遜 AI 批量上架系統 V57")
-st.success("✅ 修復完成：Map 字段物理對位鎖定、五點描述防亂碼過濾優化。")
+st.title("🔥 亞馬遜 AI 批量上架系統 V58")
+st.success("✅ 修復完成：已解決『增加款式』按鈕報錯，規則全量鎖定。")
 
-# --- 3. 側邊欄 ---
+# --- 3. 側邊欄配置 ---
 if 'size_count' not in st.session_state: st.session_state.size_count = 3
 with st.sidebar:
     st.header("📢 運營配置")
@@ -59,10 +57,11 @@ with st.sidebar:
     if st.button("➕ 增加尺寸"): st.session_state.size_count += 1; st.rerun()
     if st.button("➖ 刪除尺寸") and st.session_state.size_count > 1: st.session_state.size_count -= 1; st.rerun()
 
-# --- 4. 款式管理 ---
-if 'v57_rows' not in st.session_state: st.session_state.v57_rows = 1
+# --- 4. 款式管理 (修復點：統一鍵名為 v58_rows) ---
+if 'v58_rows' not in st.session_state: st.session_state.v58_rows = 1
 sku_items = []
-for i in range(st.session_state.v57_rows):
+st.subheader("📦 待上架款式列表")
+for i in range(st.session_state.v58_rows):
     with st.expander(f"款式 #{i+1} 配置", expanded=True):
         col_a, col_b, col_c = st.columns([1.2, 1, 1.5])
         with col_a:
@@ -71,23 +70,30 @@ for i in range(st.session_state.v57_rows):
         with col_b: m_url = st.text_input(f"主圖 URL", key=f"m_url_{i}")
         with col_c: o_urls = st.text_area(f"附圖 URLs", key=f"o_urls_{i}")
         sku_items.append({"pfx": pfx, "img": img, "main": m_url, "others": o_urls})
-if st.button("➕ 增加一個款式"): st.session_state.v56_rows += 1; st.rerun()
 
+# 修復圖 fa07bb10 報錯：確保鍵名一致
+if st.button("➕ 增加一個款式"):
+    st.session_state.v58_rows += 1
+    st.rerun()
+
+st.divider()
 tpl_file = st.file_uploader("📂 上傳 Amazon 模板", type=['xlsx', 'xlsm'])
 
 # --- 5. 核心執行 ---
-if st.button("🚀 啟動 V57 批量填充", type="primary") and tpl_file and api_key:
+if st.button("🚀 啟動 V58 批量填充", type="primary") and tpl_file and api_key:
     log_area = st.empty()
     try:
-        log_area.text("⏳ 正在建立模板索引...")
+        log_area.text("⏳ 正在讀取模板並分析結構...")
         wb = openpyxl.load_workbook(tpl_file, keep_vba=True)
         sheet = wb['Template'] if 'Template' in wb.sheetnames else wb.active
         
-        # 強化索引匹配
-        h = {re.sub(r'[^a-z0-9]', '', str(cell.value).lower()): cell.column for r in range(1, 6) for cell in sheet[r] if cell.value}
+        # 標頭索引修復
+        h = {re.sub(r'[^a-z0-9]', '', str(cell.value).lower()): cell.column for r in range(1, 6) for cell in sheet[r] if cell.value and isinstance(cell.value, str)}
         fixed_values = {col: sheet.cell(row=4, column=col).value for col in range(1, sheet.max_column + 1) if sheet.cell(row=4, column=col).value}
         
         valid_items = [item for item in sku_items if item["pfx"] and item["img"]]
+        if not valid_items: st.warning("⚠️ 請填寫完整信息"); st.stop()
+            
         indices = [re.search(r'\d+$', str(item["pfx"])).group() for item in valid_items if re.search(r'\d+$', str(item["pfx"]))]
         min_i, max_i = (min(indices), max(indices)) if indices else ("X", "Y")
         base_pfx = re.sub(r'-?\d+$', '', str(valid_items[0]["pfx"]))
@@ -97,27 +103,18 @@ if st.button("🚀 啟動 V57 批量填充", type="primary") and tpl_file and ap
         client, row_cursor = OpenAI(api_key=api_key), 4
         
         def fill(r, k_list, v):
-            """增加多路徑填充校驗，確保 Map 字段不被漏掉"""
-            filled = False
+            """Map 字段同步邏輯"""
             for k in k_list:
                 target_k = re.sub(r'[^a-z0-9]', '', str(k).lower())
                 c_idx = h.get(target_k)
-                if c_idx: 
-                    sheet.cell(row=r, column=c_idx, value=clean_copy_text(v))
-                    filled = True
-            return filled
+                if c_idx: sheet.cell(row=r, column=c_idx, value=clean_copy_text(v))
 
         def fill_fixed(r):
             for col_idx, val in fixed_values.items():
                 if not sheet.cell(row=r, column=col_idx).value: sheet.cell(row=r, column=col_idx, value=val)
 
         # AI 指令
-        prompt_rules = """JSON: {
-            "title": "SEO title 150-200 chars.",
-            "element": "One pattern word ONLY. NO color names.",
-            "bp": ["Point 1", "Point 2", "Point 3", "Point 4", "Point 5"],
-            "desc": "HTML desc"
-        }"""
+        prompt_rules = """JSON: { "title": "Rich SEO title 150-200 chars.", "element": "One pattern word ONLY.", "bp": ["Point 1", "Point 2", "Point 3", "Point 4", "Point 5"], "desc": "HTML desc" }"""
 
         # A: 父類填充
         log_area.text("⏳ 正在處理全局父類...")
@@ -142,40 +139,32 @@ if st.button("🚀 啟動 V57 批量填充", type="primary") and tpl_file and ap
             ai = json.loads(res.choices[0].message.content)
             
             p_el = str(ai.get('element','')).strip()
-
             for sz_cfg in size_matrix:
                 fill_fixed(row_cursor)
                 fill(row_cursor, ["sellersku"], f"{str(item['pfx'])}-{str(sz_cfg['size'])}")
                 fill(row_cursor, ["parentsku"], global_parent_sku)
-                
                 title = deduplicate_title(f"{brand} {ai.get('title','')} {p_el}")
                 fill(row_cursor, ["productname"], f"{title} - {str(sz_cfg['size'])}")
                 
-                # 規則鎖定：Map 字段強制對位填充
+                # 規則鎖定
                 fill(row_cursor, ["color", "colour", "colormap", "colourmap"], p_el)
                 fill(row_cursor, ["size", "itemsize", "sizemap"], str(sz_cfg['size']))
-                
-                # 規則鎖定：Sales Price 強制同步
-                val_price = str(sz_cfg['price']).strip()
-                fill(row_cursor, ["standardprice", "saleprice"], val_price)
+                fill(row_cursor, ["standardprice", "saleprice"], str(sz_cfg['price']))
                 fill(row_cursor, ["salestartdate"], start_date); fill(row_cursor, ["saleenddate"], end_date)
                 
                 fill(row_cursor, ["mainimageurl"], str(item["main"]))
                 for idx, o_url in enumerate(str(item["others"]).split('\n')[:8]):
                     fill(row_cursor, [f"otherimageurl{idx+1}"], o_url.strip())
-                
                 for bi, b_text in enumerate(ai.get('bp', [])):
-                    # 清除序號並物理過濾亂碼
                     clean_bp = re.sub(r'^(Bullet\s?\d?[:.]?\s*|^\d[:.]?\s*)', '', str(b_text), flags=re.IGNORECASE).strip()
                     fill(row_cursor, [f"keyproductfeatures{bi+1}", f"bulletpoint{bi+1}"], clean_bp)
-                
                 fill(row_cursor, ["productdescription"], ai.get('desc', ''))
                 fill(row_cursor, ["generickeywords"], format_amazon_kw(p_el, global_kws))
                 row_cursor += 1
         
         out = io.BytesIO()
         wb.save(out); wb.close(); gc.collect()
-        log_area.text("✅ V57 處理完成！")
-        st.download_button("💾 下載修復版文件", out.getvalue(), "Amazon_V57_Final.xlsm")
+        log_area.text("✅ V58 處理完成！")
+        st.download_button("💾 下載修復版文件", out.getvalue(), "Amazon_V58_Final.xlsm")
     except Exception as e:
         st.error(f"❌ 錯誤: {e}"); gc.collect()
