@@ -11,15 +11,12 @@ def clean_copy_text(text):
     return "".join(c for c in text if ord(c) >= 32 or c in '\n\r\t')
 
 def deduplicate_title(title):
-    """標題單詞去重邏輯"""
     words = title.split()
-    seen = set()
-    res = []
+    seen, res = set(), []
     for w in words:
         clean_w = re.sub(r'[^a-zA-Z0-9]', '', w).lower()
         if clean_w not in seen:
-            res.append(w)
-            seen.add(clean_w)
+            res.append(w); seen.add(clean_w)
     return " ".join(res)
 
 def format_amazon_kw(elements, global_kws):
@@ -36,112 +33,138 @@ def format_amazon_kw(elements, global_kws):
     return " ".join(res)
 
 # --- 2. 頁面配置 ---
-st.set_page_config(page_title="亞馬遜專家 V45", layout="wide")
+st.set_page_config(page_title="亞馬遜專家 V47", layout="wide")
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY") or ""
 
-st.title("🔥 亞馬遜 AI 批量上架系統 V45")
-st.success("✅ V45 優化點：標題單詞物理去重、Color 字段禁用顏色詞、其餘功能保持穩定。")
+st.title("🔥 亞馬遜 AI 批量上架系統 V47")
+st.success("✅ 已解鎖：靈活尺寸數量配置 + 全局父類架構 + 固定字段動態複製。")
+
+# --- 3. 側邊欄：動態尺寸與全局配置 ---
+if 'size_count' not in st.session_state: st.session_state.size_count = 3
 
 with st.sidebar:
-    st.header("📢 配置中心")
-    global_kws = st.text_area("✨ 通用關鍵詞單詞庫", "canvas wall art decor")
+    st.header("📢 運營中心")
     brand = st.text_input("品牌名稱", "AMAZING WALL")
+    global_kws = st.text_area("✨ 全局關鍵詞單詞庫", "canvas wall art decor")
+    
     st.divider()
-    s1, p1 = st.text_input("尺寸 1", "16x24\""), st.text_input("價格 1", "12.99")
-    s2, p2 = st.text_input("尺寸 2", "24x36\""), st.text_input("價格 2", "16.99")
-    s3, p3 = st.text_input("尺寸 3", "32x48\""), st.text_input("價格 3", "19.99")
+    st.subheader("📌 尺寸變體矩陣")
+    size_matrix = []
+    for i in range(st.session_state.size_count):
+        col_s, col_p = st.columns([2, 1])
+        with col_s: s_val = st.text_input(f"尺寸 {i+1}", key=f"size_val_{i}", value="16x24\"")
+        with col_p: p_val = st.text_input(f"價格 {i+1}", key=f"price_val_{i}", value="12.99")
+        size_matrix.append({"size": s_val, "price": p_val})
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("➕ 增加尺寸"):
+            st.session_state.size_count += 1
+            st.rerun()
+    with c2:
+        if st.button("➖ 刪除尺寸") and st.session_state.size_count > 1:
+            st.session_state.size_count -= 1
+            st.rerun()
 
-if 'v45_rows' not in st.session_state: st.session_state.v45_rows = 1
+# --- 4. 款式管理 ---
+if 'v47_rows' not in st.session_state: st.session_state.v47_rows = 1
 sku_items = []
-for i in range(st.session_state.v45_rows):
+st.subheader("📦 待上架款式列表")
+for i in range(st.session_state.v47_rows):
     with st.expander(f"款式 #{i+1} 配置", expanded=True):
-        c1, c2, c3 = st.columns([1, 1, 1.5])
-        with c1:
-            pfx = st.text_input(f"SKU 前綴", key=f"pfx_{i}")
+        col_a, col_b, col_c = st.columns([1.2, 1, 1.5])
+        with col_a:
+            pfx = st.text_input(f"SKU 前綴", key=f"pfx_{i}", placeholder="LMX-SDS-082")
             img = st.file_uploader(f"分析圖片", key=f"img_{i}")
-        with c2: m_url = st.text_input(f"主圖 URL", key=f"m_url_{i}")
-        with c3: o_urls = st.text_area(f"附圖 URLs (每行一個)", key=f"o_urls_{i}")
+        with col_b: m_url = st.text_input(f"主圖 URL", key=f"m_url_{i}")
+        with col_c: o_urls = st.text_area(f"附圖 URLs (每行一個)", key=f"o_urls_{i}")
         sku_items.append({"pfx": pfx, "img": img, "main": m_url, "others": o_urls})
 
 if st.button("➕ 增加一個款式"):
-    st.session_state.v45_rows += 1; st.rerun()
+    st.session_state.v47_rows += 1
+    st.rerun()
 
+st.divider()
 tpl_file = st.file_uploader("📂 上傳 Amazon 模板", type=['xlsx', 'xlsm'])
 
-# --- 5. 執行生成 ---
-if st.button("🚀 啟動 V45 生成", type="primary") and tpl_file and api_key:
-    with st.spinner('正在分析圖片並執行去重邏輯...'):
+# --- 5. 執行填充 ---
+if st.button("🚀 啟動 V47 批量填充", type="primary") and tpl_file and api_key:
+    with st.spinner('AI 正在構建動態架構並填充...'):
         try:
             wb = openpyxl.load_workbook(tpl_file, keep_vba=True)
             sheet = wb['Template'] if 'Template' in wb.sheetnames else wb.active
-            h = {re.sub(r'[^a-z0-9]', '', str(cell.value).lower()): cell.column 
-                 for r in range(1, 6) for cell in sheet[r] if cell.value}
+            h = {re.sub(r'[^a-z0-9]', '', str(cell.value).lower()): cell.column for r in range(1, 6) for cell in sheet[r] if cell.value}
             
+            # 保存第 4 行固定字段
+            fixed_values = {col: sheet.cell(row=4, column=col).value for col in range(1, sheet.max_column + 1) if sheet.cell(row=4, column=col).value}
+
+            valid_items = [item for item in sku_items if item["pfx"] and item["img"]]
+            if not valid_items: st.error("❌ 請填寫完整信息！"); st.stop()
+            
+            # 全局父類 SKU 計算
+            indices = [re.search(r'\d+$', item["pfx"]).group() for item in valid_items if re.search(r'\d+$', item["pfx"])]
+            if indices:
+                min_i, max_i = min(indices), max(indices)
+                base_pfx = re.sub(r'-?\d+$', '', valid_items[0]["pfx"])
+                global_parent_sku = f"{base_pfx}-{min_i}-{max_i}-P"
+            else:
+                global_parent_sku = f"{valid_items[0]['pfx']}-Global-P"
+
             start_date, end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
             client = OpenAI(api_key=api_key)
             row_cursor = 4
+            
+            def fill(r, k_list, v):
+                for k in k_list:
+                    c_idx = h.get(re.sub(r'[^a-z0-9]', '', k.lower()))
+                    if c_idx: sheet.cell(row=r, column=c_idx, value=clean_copy_text(v)); break
 
-            for item in sku_items:
-                if not (item["pfx"] and item["img"]): continue
+            def fill_fixed(r):
+                for col_idx, val in fixed_values.items():
+                    if not sheet.cell(row=r, column=col_idx).value: sheet.cell(row=r, column=col_idx, value=val)
+
+            # A. 寫入全局父類行
+            fill(row_cursor, ["sellersku"], global_parent_sku)
+            fill(row_cursor, ["productname"], f"{brand} Collection {global_parent_sku.replace('-P','')}")
+            fill_fixed(row_cursor); row_cursor += 1
+
+            # B. 遍歷款式與動態尺寸
+            for item in valid_items:
                 item["img"].seek(0)
                 b64 = base64.b64encode(item["img"].read()).decode('utf-8')
-                
-                # 強化指令：禁止重複單詞，禁止顏色詞
-                prompt = f"""Act as Amazon SEO expert. JSON Output: {{ 
-                    "title": "Extended title 150-200 chars. Use unique words ONLY.", 
-                    "element_word": "ONLY one element word like Beach or Forest. NO color words like Blue/Red.", 
-                    "bp": ["Bullet1", "Bullet2", "Bullet3", "Bullet4", "Bullet5"],
-                    "desc": "HTML formatted description"
-                }}"""
-                
                 res = client.chat.completions.create(
                     model="gpt-4o",
-                    messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}],
+                    messages=[{"role":"user","content":[{"type":"text","text":"Analyze art JSON: {title, element_word, bp:[5], desc}"},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}],
                     response_format={"type":"json_object"}
                 )
                 ai = json.loads(res.choices[0].message.content)
                 
-                p_sku = f"{item['pfx']}-P"
-                rows_cfg = [{"t":"P","s":p_sku,"sz":"","pr":""},
-                            {"t":"C","s":f"{item['pfx']}-{s1}","sz":s1,"pr":p1},
-                            {"t":"C","s":f"{item['pfx']}-{s2}","sz":s2,"pr":p2},
-                            {"t":"C","s":f"{item['pfx']}-{s3}","sz":s3,"pr":p3}]
-                
-                for r in rows_cfg:
-                    def fill(k_list, v):
-                        for k in k_list:
-                            c_idx = h.get(re.sub(r'[^a-z0-9]', '', k.lower()))
-                            if c_idx: sheet.cell(row=row_cursor, column=c_idx, value=clean_copy_text(v))
-
-                    fill(["sellersku"], r["s"])
-                    fill(["mainimageurl"], item["main"])
+                # 遍歷用戶自定義的尺寸矩陣
+                for sz_cfg in size_matrix:
+                    fill_fixed(row_cursor)
+                    fill(row_cursor, ["sellersku"], f"{item['pfx']}-{sz_cfg['size']}")
+                    fill(row_cursor, ["parentsku"], global_parent_sku)
+                    
+                    title = deduplicate_title(f"{brand} {ai['title']} {ai['element_word']}")
+                    fill(row_cursor, ["productname"], f"{title} - {sz_cfg['size']}")
+                    fill(row_cursor, ["color", "colour", "colormap"], ai['element_word'])
+                    fill(row_cursor, ["size", "itemsize", "sizemap"], sz_cfg['size'])
+                    fill(row_cursor, ["standardprice", "saleprice"], sz_cfg['price'])
+                    fill(row_cursor, ["salestartdate"], start_date); fill(row_cursor, ["saleenddate"], end_date)
+                    fill(row_cursor, ["mainimageurl"], item["main"])
                     for idx, o_url in enumerate(item["others"].split('\n')[:8]):
-                        fill([f"otherimageurl{idx+1}"], o_url.strip())
-
-                    # 標題去重處理
-                    raw_title = f"{brand} {ai['title']} {ai['element_word']}"
-                    clean_title = deduplicate_title(raw_title)
-
-                    if r["t"] == "C":
-                        fill(["parentsku"], p_sku)
-                        fill(["productname"], f"{clean_title} - {r['sz']}")
-                        fill(["color", "colour", "colormap", "colourmap"], ai['element_word'])
-                        fill(["size", "itemsize", "sizemap"], r['sz'])
-                        fill(["standardprice", "saleprice"], r['pr'])
-                        fill(["salestartdate"], start_date); fill(["saleenddate"], end_date)
-                    else:
-                        fill(["productname"], clean_title)
-
+                        fill(row_cursor, [f"otherimageurl{idx+1}"], o_url.strip())
+                    
                     for bi, b_text in enumerate(ai.get('bp', [])):
                         clean_bp = re.sub(r'^(Bullet\s?\d?[:.]?\s*|^\d[:.]?\s*)', '', b_text, flags=re.IGNORECASE).strip()
-                        fill([f"keyproductfeatures{bi+1}", f"bulletpoint{bi+1}"], clean_bp)
+                        fill(row_cursor, [f"keyproductfeatures{bi+1}", f"bulletpoint{bi+1}"], clean_bp)
                     
-                    fill(["productdescription"], ai.get('desc', ''))
-                    fill(["generickeywords", "searchterms"], format_amazon_kw(ai.get('element_word', ''), global_kws))
+                    fill(row_cursor, ["productdescription"], ai.get('desc', ''))
+                    fill(row_cursor, ["generickeywords"], format_amazon_kw(ai.get('element_word', ''), global_kws))
                     row_cursor += 1
 
             out = io.BytesIO()
             wb.save(out)
-            st.success("✅ V45 生成完成！")
-            st.download_button("💾 下載文件", out.getvalue(), "Amazon_V45.xlsm")
+            st.success(f"✅ 生成完成！共處理 {len(valid_items)} 個款式，每個款式包含 {st.session_state.size_count} 個尺寸變體。")
+            st.download_button("💾 下載靈活批量文件", out.getvalue(), "Amazon_V47_Flexible.xlsm")
         except Exception as e: st.error(f"❌ 錯誤: {e}")
