@@ -4,10 +4,9 @@ import io, base64, json, re, openpyxl, os, gc
 from openai import OpenAI
 from datetime import datetime, timedelta
 
-# --- 1. 核心工具 (強化亂碼處理) ---
+# --- 1. 核心工具 ---
 def clean_copy_text(text):
     if pd.isna(text) or str(text).strip() == "": return ""
-    # 物理清除潛在的編碼干擾字符
     text_str = str(text).replace('["', '').replace('"]', '').strip()
     return "".join(c for c in text_str if ord(c) >= 32 or c in '\n\r\t')
 
@@ -34,11 +33,11 @@ def format_amazon_kw(elements, global_kws):
     return " ".join(res)
 
 # --- 2. 頁面配置 ---
-st.set_page_config(page_title="亞馬遜專家 V53", layout="wide")
+st.set_page_config(page_title="亞馬遜專家 V54", layout="wide")
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY") or ""
 
-st.title("🔥 亞馬遜 AI 批量上架系統 V53")
-st.success("✅ 規則鎖定：Map字段必填、價格同步、父子類五點描述補全、防亂碼處理。")
+st.title("🔥 亞馬遜 AI 批量上架系統 V54")
+st.success("✅ 網站啟動修復：已解決 SyntaxError 崩潰問題，規則全固化。")
 
 # --- 3. 側邊欄配置 ---
 if 'size_count' not in st.session_state: st.session_state.size_count = 3
@@ -57,9 +56,9 @@ with st.sidebar:
     if st.button("➖ 刪除尺寸") and st.session_state.size_count > 1: st.session_state.size_count -= 1; st.rerun()
 
 # --- 4. 款式管理 ---
-if 'v53_rows' not in st.session_state: st.session_state.v53_rows = 1
+if 'v54_rows' not in st.session_state: st.session_state.v54_rows = 1
 sku_items = []
-for i in range(st.session_state.v53_rows):
+for i in range(st.session_state.v54_rows):
     with st.expander(f"款式 #{i+1} 配置", expanded=True):
         col_a, col_b, col_c = st.columns([1.2, 1, 1.5])
         with col_a:
@@ -68,24 +67,22 @@ for i in range(st.session_state.v53_rows):
         with col_b: m_url = st.text_input(f"主圖 URL", key=f"m_url_{i}")
         with col_c: o_urls = st.text_area(f"附圖 URLs", key=f"o_urls_{i}")
         sku_items.append({"pfx": pfx, "img": img, "main": m_url, "others": o_urls})
-if st.button("➕ 增加一個款式"): st.session_state.v53_rows += 1; st.rerun()
+if st.button("➕ 增加一個款式"): st.session_state.v54_rows += 1; st.rerun()
 
 tpl_file = st.file_uploader("📂 上傳 Amazon 模板", type=['xlsx', 'xlsm'])
 
 # --- 5. 核心執行 ---
-if st.button("🚀 啟動 V53 全量填充", type="primary") and tpl_file and api_key:
+if st.button("🚀 啟動 V54 批量填充", type="primary") and tpl_file and api_key:
     log_area = st.empty()
     try:
-        log_area.text("⏳ 正在加載模板...")
+        log_area.text("⏳ 正在加載模板並掃描列名...")
         wb = openpyxl.load_workbook(tpl_file, keep_vba=True)
         sheet = wb['Template'] if 'Template' in wb.sheetnames else wb.active
-        
-        # 建立列名字典，增加容錯
         h = {re.sub(r'[^a-z0-9]', '', str(cell.value).lower()): cell.column for r in range(1, 6) for cell in sheet[r] if cell.value}
         fixed_values = {col: sheet.cell(row=4, column=col).value for col in range(1, sheet.max_column + 1) if sheet.cell(row=4, column=col).value}
         
         valid_items = [item for item in sku_items if item["pfx"] and item["img"]]
-        if not valid_items: st.warning("⚠️ 請填寫完整信息"); st.stop()
+        if not valid_items: st.warning("⚠️ 請填寫完整信息！"); st.stop()
             
         indices = [re.search(r'\d+$', str(item["pfx"])).group() for item in valid_items if re.search(r'\d+$', str(item["pfx"]))]
         min_i, max_i = (min(indices), max(indices)) if indices else ("X", "Y")
@@ -105,15 +102,14 @@ if st.button("🚀 啟動 V53 全量填充", type="primary") and tpl_file and ap
             for col_idx, val in fixed_values.items():
                 if not sheet.cell(row=r, column=col_idx).value: sheet.cell(row=r, column=col_idx, value=val)
 
-        # 1. 預分析第一個款式用於填充父類描述
-        log_area.text("⏳ 正在分析父類文案...")
+        log_area.text("⏳ 正在分析全局父類文案...")
         valid_items[0]["img"].seek(0)
         b64_p = base64.b64encode(valid_items[0]["img"].read()).decode('utf-8')
-        prompt_p = """JSON Output: { "title": "150-200 chars SEO title", "element": "One word", "bp": ["Long point1", "Long point2", "Long point3", "Long point4", "Long point5"], "desc": "HTML desc" }"""
+        prompt_p = """JSON Output: { "title": "150-200 chars title", "element": "One word", "bp": ["Point1", "Point2", "Point3", "Point4", "Point5"], "desc": "HTML desc" }"""
         res_p = client.chat.completions.create(model="gpt-4o", messages=[{"role":"user","content":[{"type":"text","text":prompt_p},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64_p}"}}]}], response_format={"type":"json_object"})
         ai_p = json.loads(res_p.choices[0].message.content)
 
-        # 步驟 A: 寫入父類行 (同步帶入描述與圖片)
+        # A: 寫入唯一全局父類
         fill(row_cursor, ["sellersku"], global_parent_sku)
         fill(row_cursor, ["productname"], f"{brand} Collection {global_parent_sku.replace('-P','')}")
         fill(row_cursor, ["mainimageurl"], valid_items[0]["main"])
@@ -121,9 +117,9 @@ if st.button("🚀 啟動 V53 全量填充", type="primary") and tpl_file and ap
             fill(row_cursor, [f"keyproductfeatures{bi+1}", f"bulletpoint{bi+1}"], b_text)
         fill_fixed(row_cursor); row_cursor += 1
 
-        # 步驟 B: 子類循環
+        # B: 寫入子類款式
         for item in valid_items:
-            log_area.text(f"⏳ 正在處理款式: {item['pfx']}...")
+            log_area.text(f"⏳ 正在分析子類: {item['pfx']}...")
             item["img"].seek(0)
             b64 = base64.b64encode(item["img"].read()).decode('utf-8')
             res = client.chat.completions.create(model="gpt-4o", messages=[{"role":"user","content":[{"type":"text","text":prompt_p},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}], response_format={"type":"json_object"})
@@ -137,23 +133,34 @@ if st.button("🚀 啟動 V53 全量填充", type="primary") and tpl_file and ap
                 title = deduplicate_title(f"{brand} {ai.get('title','')} {ai.get('element','')}")
                 fill(row_cursor, ["productname"], f"{title} - {str(sz_cfg['size'])}")
                 
-                # Color/Size Map 必填優化
+                # Map 字段 & 售價必填
                 val_element = ai.get('element','')
-                fill(row_cursor, ["color", "colour"], val_element)
-                fill(row_cursor, ["colormap", "colourmap"], val_element)
+                fill(row_cursor, ["color", "colour", "colormap", "colourmap"], val_element)
                 
                 val_size = str(sz_cfg['size'])
-                fill(row_cursor, ["size", "itemsize"], val_size)
-                fill(row_cursor, ["sizemap"], val_size)
+                fill(row_cursor, ["size", "itemsize", "sizemap"], val_size)
                 
-                # 售價同步必填
                 val_price = str(sz_cfg['price'])
-                fill(row_cursor, ["standardprice"], val_price)
-                fill(row_cursor, ["saleprice"], val_price)
+                fill(row_cursor, ["standardprice", "saleprice"], val_price)
                 fill(row_cursor, ["salestartdate"], start_date); fill(row_cursor, ["saleenddate"], end_date)
                 
                 fill(row_cursor, ["mainimageurl"], str(item["main"]))
                 for idx, o_url in enumerate(str(item["others"]).split('\n')[:8]):
                     fill(row_cursor, [f"otherimageurl{idx+1}"], o_url.strip())
                 
-                #
+                for bi, b_text in enumerate(ai.get('bp', [])):
+                    clean_bp = re.sub(r'^(Bullet\s?\d?[:.]?\s*|^\d[:.]?\s*)', '', str(b_text), flags=re.IGNORECASE).strip()
+                    fill(row_cursor, [f"keyproductfeatures{bi+1}", f"bulletpoint{bi+1}"], clean_bp)
+                
+                fill(row_cursor, ["productdescription"], ai.get('desc', ''))
+                fill(row_cursor, ["generickeywords"], format_amazon_kw(val_element, global_kws))
+                row_cursor += 1
+        
+        out = io.BytesIO()
+        wb.save(out); wb.close(); gc.collect()
+        log_area.text("✅ 全部處理完成！")
+        st.download_button("💾 下載修復版文件", out.getvalue(), "Amazon_V54_Final.xlsm")
+        
+    except Exception as e:
+        st.error(f"❌ 發生錯誤: {e}")
+        gc.collect()
