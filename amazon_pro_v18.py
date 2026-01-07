@@ -6,14 +6,23 @@ from datetime import datetime, timedelta
 
 # --- 1. 核心工具 ---
 def clean_copy_text(text):
-    """移除非法字符，防止 Excel 亂碼"""
     if pd.isna(text) or str(text).strip() == "": return ""
     text = str(text).replace('["', '').replace('"]', '').replace('"', '"').strip()
-    # 物理移除 ASCII 0-31 等可能導致 Excel 損壞的不可見字符
     return "".join(c for c in text if ord(c) >= 32 or c in '\n\r\t')
 
+def deduplicate_title(title):
+    """標題單詞去重邏輯"""
+    words = title.split()
+    seen = set()
+    res = []
+    for w in words:
+        clean_w = re.sub(r'[^a-zA-Z0-9]', '', w).lower()
+        if clean_w not in seen:
+            res.append(w)
+            seen.add(clean_w)
+    return " ".join(res)
+
 def format_amazon_kw(elements, global_kws):
-    """關鍵詞 250 字符熔斷，保持單詞完整"""
     raw_str = f"{elements} {global_kws}".replace(",", " ").replace(";", " ")
     words = raw_str.split()
     seen, res, curr_len = set(), [], 0
@@ -27,11 +36,11 @@ def format_amazon_kw(elements, global_kws):
     return " ".join(res)
 
 # --- 2. 頁面配置 ---
-st.set_page_config(page_title="亞馬遜專家 V44", layout="wide")
+st.set_page_config(page_title="亞馬遜專家 V45", layout="wide")
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY") or ""
 
-st.title("🔥 亞馬遜 AI 批量上架系統 V44")
-st.success("✅ V44 優化點：標題豐富化(200字)、五點描述模版化、物理消除亂碼。")
+st.title("🔥 亞馬遜 AI 批量上架系統 V45")
+st.success("✅ V45 優化點：標題單詞物理去重、Color 字段禁用顏色詞、其餘功能保持穩定。")
 
 with st.sidebar:
     st.header("📢 配置中心")
@@ -42,9 +51,9 @@ with st.sidebar:
     s2, p2 = st.text_input("尺寸 2", "24x36\""), st.text_input("價格 2", "16.99")
     s3, p3 = st.text_input("尺寸 3", "32x48\""), st.text_input("價格 3", "19.99")
 
-if 'v44_rows' not in st.session_state: st.session_state.v44_rows = 1
+if 'v45_rows' not in st.session_state: st.session_state.v45_rows = 1
 sku_items = []
-for i in range(st.session_state.v44_rows):
+for i in range(st.session_state.v45_rows):
     with st.expander(f"款式 #{i+1} 配置", expanded=True):
         c1, c2, c3 = st.columns([1, 1, 1.5])
         with c1:
@@ -55,13 +64,13 @@ for i in range(st.session_state.v44_rows):
         sku_items.append({"pfx": pfx, "img": img, "main": m_url, "others": o_urls})
 
 if st.button("➕ 增加一個款式"):
-    st.session_state.v44_rows += 1; st.rerun()
+    st.session_state.v45_rows += 1; st.rerun()
 
 tpl_file = st.file_uploader("📂 上傳 Amazon 模板", type=['xlsx', 'xlsm'])
 
 # --- 5. 執行生成 ---
-if st.button("🚀 啟動 V44 生成", type="primary") and tpl_file and api_key:
-    with st.spinner('正在分析圖片並豐富文案...'):
+if st.button("🚀 啟動 V45 生成", type="primary") and tpl_file and api_key:
+    with st.spinner('正在分析圖片並執行去重邏輯...'):
         try:
             wb = openpyxl.load_workbook(tpl_file, keep_vba=True)
             sheet = wb['Template'] if 'Template' in wb.sheetnames else wb.active
@@ -77,17 +86,11 @@ if st.button("🚀 啟動 V44 生成", type="primary") and tpl_file and api_key:
                 item["img"].seek(0)
                 b64 = base64.b64encode(item["img"].read()).decode('utf-8')
                 
-                # 強化標題長度與五點模板
-                prompt = f"""Act as Amazon SEO expert. Output JSON: {{ 
-                    "title": "Extended title 150-200 chars. Formula: Brand+Core Keywords+Style+Usage Scene+Color+Material.", 
-                    "color_word": "One word", 
-                    "bp": [
-                        "Bullet1: Pain Point Solution/Emotional Value",
-                        "Bullet2: High-Quality Product Features/Materials",
-                        "Bullet3: Detailed Usage Scenes/Home Decor Impact",
-                        "Bullet4: Installation Guide/Package Contents",
-                        "Bullet5: Specifications & Commitment/Service"
-                    ],
+                # 強化指令：禁止重複單詞，禁止顏色詞
+                prompt = f"""Act as Amazon SEO expert. JSON Output: {{ 
+                    "title": "Extended title 150-200 chars. Use unique words ONLY.", 
+                    "element_word": "ONLY one element word like Beach or Forest. NO color words like Blue/Red.", 
+                    "bp": ["Bullet1", "Bullet2", "Bullet3", "Bullet4", "Bullet5"],
                     "desc": "HTML formatted description"
                 }}"""
                 
@@ -115,28 +118,30 @@ if st.button("🚀 啟動 V44 生成", type="primary") and tpl_file and api_key:
                     for idx, o_url in enumerate(item["others"].split('\n')[:8]):
                         fill([f"otherimageurl{idx+1}"], o_url.strip())
 
-                    full_title = f"{brand} {ai['title']} {ai['color_word']}"
+                    # 標題去重處理
+                    raw_title = f"{brand} {ai['title']} {ai['element_word']}"
+                    clean_title = deduplicate_title(raw_title)
+
                     if r["t"] == "C":
                         fill(["parentsku"], p_sku)
-                        fill(["productname"], f"{full_title} - {r['sz']}")
-                        fill(["color", "colour", "colormap", "colourmap"], ai['color_word'])
+                        fill(["productname"], f"{clean_title} - {r['sz']}")
+                        fill(["color", "colour", "colormap", "colourmap"], ai['element_word'])
                         fill(["size", "itemsize", "sizemap"], r['sz'])
                         fill(["standardprice", "saleprice"], r['pr'])
                         fill(["salestartdate"], start_date); fill(["saleenddate"], end_date)
                     else:
-                        fill(["productname"], full_title)
+                        fill(["productname"], clean_title)
 
-                    # 五點描述：去序號，確保內容完整
                     for bi, b_text in enumerate(ai.get('bp', [])):
                         clean_bp = re.sub(r'^(Bullet\s?\d?[:.]?\s*|^\d[:.]?\s*)', '', b_text, flags=re.IGNORECASE).strip()
                         fill([f"keyproductfeatures{bi+1}", f"bulletpoint{bi+1}"], clean_bp)
                     
                     fill(["productdescription"], ai.get('desc', ''))
-                    fill(["generickeywords", "searchterms"], format_amazon_kw(ai.get('color_word', ''), global_kws))
+                    fill(["generickeywords", "searchterms"], format_amazon_kw(ai.get('element_word', ''), global_kws))
                     row_cursor += 1
 
             out = io.BytesIO()
             wb.save(out)
-            st.success("✅ V44 生成完成！")
-            st.download_button("💾 下載文件", out.getvalue(), "Amazon_V44.xlsm")
+            st.success("✅ V45 生成完成！")
+            st.download_button("💾 下載文件", out.getvalue(), "Amazon_V45.xlsm")
         except Exception as e: st.error(f"❌ 錯誤: {e}")
