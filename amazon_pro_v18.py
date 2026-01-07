@@ -4,7 +4,7 @@ import io, base64, json, re, openpyxl, os, gc
 from openai import OpenAI
 from datetime import datetime, timedelta
 
-# --- 1. 核心工具 (保留標點，處理亂碼) ---
+# --- 1. 核心工具 ---
 def clean_copy_text(text):
     if pd.isna(text) or str(text).strip() == "": return ""
     text_str = str(text).replace('["', '').replace('"]', '').strip()
@@ -33,13 +33,13 @@ def format_amazon_kw(elements, global_kws):
     return " ".join(res)
 
 # --- 2. 頁面配置 ---
-st.set_page_config(page_title="亞馬遜專家 V51", layout="wide")
+st.set_page_config(page_title="亞馬遜專家 V52", layout="wide")
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY") or ""
 
-st.title("🔥 亞馬遜 AI 批量上架系統 V51")
-st.success("✅ 規則鎖定：200字長標題、父類帶圖、Map字段強制填充、售價必填、五點補完。")
+st.title("🔥 亞馬遜 AI 批量上架系統 V52")
+st.info("✅ 已優化執行響應：如果点击启动没反应，请观察页面上方的进度提示。")
 
-# --- 3. 側邊欄 ---
+# --- 3. 側邊欄配置 ---
 if 'size_count' not in st.session_state: st.session_state.size_count = 3
 with st.sidebar:
     st.header("📢 運營配置")
@@ -56,9 +56,9 @@ with st.sidebar:
     if st.button("➖ 刪除尺寸") and st.session_state.size_count > 1: st.session_state.size_count -= 1; st.rerun()
 
 # --- 4. 款式管理 ---
-if 'v51_rows' not in st.session_state: st.session_state.v51_rows = 1
+if 'v52_rows' not in st.session_state: st.session_state.v52_rows = 1
 sku_items = []
-for i in range(st.session_state.v51_rows):
+for i in range(st.session_state.v52_rows):
     with st.expander(f"款式 #{i+1} 配置", expanded=True):
         col_a, col_b, col_c = st.columns([1.2, 1, 1.5])
         with col_a:
@@ -67,20 +67,30 @@ for i in range(st.session_state.v51_rows):
         with col_b: m_url = st.text_input(f"主圖 URL", key=f"m_url_{i}")
         with col_c: o_urls = st.text_area(f"附圖 URLs", key=f"o_urls_{i}")
         sku_items.append({"pfx": pfx, "img": img, "main": m_url, "others": o_urls})
-if st.button("➕ 增加一個款式"): st.session_state.v51_rows += 1; st.rerun()
+if st.button("➕ 增加一個款式"): st.session_state.v52_rows += 1; st.rerun()
 
 tpl_file = st.file_uploader("📂 上傳 Amazon 模板", type=['xlsx', 'xlsm'])
 
 # --- 5. 核心執行 ---
-if st.button("🚀 啟動 V51 全規則填充", type="primary") and tpl_file and api_key:
+if st.button("🚀 啟動 V52 全量填充", type="primary") and tpl_file and api_key:
+    # 建立動態反饋區
     progress_bar = st.progress(0)
+    log_area = st.empty()
+    
     try:
-        wb = openpyxl.load_workbook(tpl_file, keep_vba=True)
+        log_area.text("⏳ 正在加載大模板文件 (1.3MB)...")
+        wb = openpyxl.load_workbook(tpl_file, keep_vba=True, data_only=False)
         sheet = wb['Template'] if 'Template' in wb.sheetnames else wb.active
+        
+        log_area.text("⏳ 正在建立模板索引...")
         h = {re.sub(r'[^a-z0-9]', '', str(cell.value).lower()): cell.column for r in range(1, 6) for cell in sheet[r] if cell.value}
         fixed_values = {col: sheet.cell(row=4, column=col).value for col in range(1, sheet.max_column + 1) if sheet.cell(row=4, column=col).value}
-        valid_items = [item for item in sku_items if item["pfx"] and item["img"]]
         
+        valid_items = [item for item in sku_items if item["pfx"] and item["img"]]
+        if not valid_items:
+            st.warning("⚠️ 請至少上傳一個完整的款式配置！")
+            st.stop()
+            
         indices = [re.search(r'\d+$', str(item["pfx"])).group() for item in valid_items if re.search(r'\d+$', str(item["pfx"]))]
         min_i, max_i = (min(indices), max(indices)) if indices else ("X", "Y")
         base_pfx = re.sub(r'-?\d+$', '', str(valid_items[0]["pfx"]))
@@ -99,18 +109,22 @@ if st.button("🚀 啟動 V51 全規則填充", type="primary") and tpl_file and
             for col_idx, val in fixed_values.items():
                 if not sheet.cell(row=r, column=col_idx).value: sheet.cell(row=r, column=col_idx, value=val)
 
-        # 步驟 A: 寫入全局父類 (規則 2: 父類帶圖)
+        # 步驟 A: 父類行 (固化：帶圖片)
+        log_area.text(f"⏳ 正在生成父類: {global_parent_sku}")
         fill(row_cursor, ["sellersku"], global_parent_sku)
         fill(row_cursor, ["productname"], f"{brand} Collection {global_parent_sku.replace('-P','')}")
-        fill(row_cursor, ["mainimageurl"], valid_items[0]["main"]) # 父類帶圖
+        fill(row_cursor, ["mainimageurl"], valid_items[0]["main"])
         fill_fixed(row_cursor); row_cursor += 1
+        progress_bar.progress(10)
 
-        # 步驟 B: 寫入款式
+        # 步驟 B: 子類循環
         for step, item in enumerate(valid_items):
+            log_area.text(f"⏳ AI 正在分析款式: {item['pfx']}...")
             item["img"].seek(0)
             b64 = base64.b64encode(item["img"].read()).decode('utf-8')
-            # 規則 1: 標題豐富化指令
-            prompt = f"""Act as Amazon SEO expert. JSON Output: {{ "title": "Rich title 150-200 chars, keywords heavy, NO repeat words.", "element": "One word only, NO color words.", "bp": ["Point1", "Point2", "Point3", "Point4", "Point5"], "desc": "HTML desc" }}"""
+            
+            # 固化指令：長標題 + 元素詞
+            prompt = f"""Act as Amazon SEO expert. JSON Output: {{ "title": "Rich title 150-200 chars, SEO keywords, NO repeat words.", "element": "One word only, NO color words.", "bp": ["Point1", "Point2", "Point3", "Point4", "Point5"], "desc": "HTML desc" }}"""
             res = client.chat.completions.create(
                 model="gpt-4o", messages=[{"role":"user","content":[{"type":"text","text":prompt},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}], response_format={"type":"json_object"}
             )
@@ -124,22 +138,16 @@ if st.button("🚀 啟動 V51 全規則填充", type="primary") and tpl_file and
                 clean_title = deduplicate_title(f"{brand} {ai.get('title','')} {ai.get('element','')}")
                 fill(row_cursor, ["productname"], f"{clean_title} - {str(sz_cfg['size'])}")
                 
-                # 規則 4, 5: Map 字段必填且一致
-                fill(row_cursor, ["color", "colour"], ai.get('element',''))
-                fill(row_cursor, ["colormap", "colourmap"], ai.get('element',''))
-                fill(row_cursor, ["size", "itemsize"], str(sz_cfg['size']))
-                fill(row_cursor, ["sizemap"], str(sz_cfg['size']))
-                
-                # 規則 6: Sales Price 必填
-                fill(row_cursor, ["standardprice"], str(sz_cfg['price']))
-                fill(row_cursor, ["saleprice"], str(sz_cfg['price']))
+                # 固化：Map 字段與售價必填
+                fill(row_cursor, ["color", "colour", "colormap", "colourmap"], ai.get('element',''))
+                fill(row_cursor, ["size", "itemsize", "sizemap"], str(sz_cfg['size']))
+                fill(row_cursor, ["standardprice", "saleprice"], str(sz_cfg['price']))
                 fill(row_cursor, ["salestartdate"], start_date); fill(row_cursor, ["saleenddate"], end_date)
                 
                 fill(row_cursor, ["mainimageurl"], str(item["main"]))
                 for idx, o_url in enumerate(str(item["others"]).split('\n')[:8]):
                     fill(row_cursor, [f"otherimageurl{idx+1}"], o_url.strip())
                 
-                # 規則 3: 五點描述物理寫入
                 for bi, b_text in enumerate(ai.get('bp', [])):
                     clean_bp = re.sub(r'^(Bullet\s?\d?[:.]?\s*|^\d[:.]?\s*)', '', str(b_text), flags=re.IGNORECASE).strip()
                     fill(row_cursor, [f"keyproductfeatures{bi+1}", f"bulletpoint{bi+1}"], clean_bp)
@@ -147,9 +155,23 @@ if st.button("🚀 啟動 V51 全規則填充", type="primary") and tpl_file and
                 fill(row_cursor, ["productdescription"], ai.get('desc', ''))
                 fill(row_cursor, ["generickeywords"], format_amazon_kw(ai.get('element',''), global_kws))
                 row_cursor += 1
-            progress_bar.progress(int((step + 1) / len(valid_items) * 100))
+            
+            # 更新進度條
+            pct = 10 + int((step + 1) / len(valid_items) * 80)
+            progress_bar.progress(pct)
 
+        log_area.text("⏳ 正在封裝 Excel 並釋放內存...")
         out = io.BytesIO()
-        wb.save(out); wb.close(); gc.collect()
-        st.download_button("💾 下載 V51 終極版", out.getvalue(), "Amazon_V51.xlsm")
-    except Exception as e: st.error(f"❌ 錯誤: {e}")
+        wb.save(out)
+        wb.close()
+        del wb
+        gc.collect() # 物理清理
+        
+        progress_bar.progress(100)
+        log_area.text("✅ 全部處理完成！")
+        st.download_button("💾 下載修復版文件", out.getvalue(), "Amazon_V52_Final.xlsm")
+        
+    except Exception as e:
+        log_area.text(f"❌ 發生錯誤: {e}")
+        st.error(f"詳細錯誤信息: {e}")
+        gc.collect()
