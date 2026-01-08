@@ -21,6 +21,7 @@ def deduplicate_title(title):
     return " ".join(res)
 
 def format_amazon_kw(elements, global_kws):
+    """SEO 權重優化：嚴格單詞化，禁止長句進入關鍵詞列"""
     raw_str = f"{str(elements)} {str(global_kws)}".replace(",", " ").replace(";", " ")
     words = raw_str.split()
     seen, res, curr_len = set(), [], 0
@@ -34,11 +35,11 @@ def format_amazon_kw(elements, global_kws):
     return " ".join(res)
 
 # --- 2. 頁面配置 ---
-st.set_page_config(page_title="亞馬遜專家 V66", layout="wide")
+st.set_page_config(page_title="亞馬遜專家 V67", layout="wide")
 api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY") or ""
 
-st.title("🔥 亞馬遜 AI 批量上架系統 V66")
-st.success("✅ 修復完成：解決 fill 未定義報錯，鎖定 SEO 深度抓取與固定值同步規則。")
+st.title("🔥 亞馬遜 AI 批量上架系統 V67")
+st.success("✅ 格式修復：恢復標題/顏色/關鍵詞的規範結構，禁止長句填充。")
 
 # --- 3. 側邊欄配置 ---
 if 'size_count' not in st.session_state: st.session_state.size_count = 3
@@ -57,9 +58,9 @@ with st.sidebar:
     if st.button("➖ 刪除尺寸") and st.session_state.size_count > 1: st.session_state.size_count -= 1; st.rerun()
 
 # --- 4. 款式管理 ---
-if 'v66_rows' not in st.session_state: st.session_state.v66_rows = 1
+if 'v67_rows' not in st.session_state: st.session_state.v67_rows = 1
 sku_items = []
-for i in range(st.session_state.v66_rows):
+for i in range(st.session_state.v67_rows):
     with st.expander(f"款式 #{i+1} 配置", expanded=True):
         col_a, col_b, col_c = st.columns([1.2, 1, 1.5])
         with col_a:
@@ -70,20 +71,18 @@ for i in range(st.session_state.v66_rows):
         sku_items.append({"pfx": pfx, "img": img, "main": m_url, "others": o_urls})
 
 if st.button("➕ 增加一個款式"):
-    st.session_state.v66_rows += 1; st.rerun()
+    st.session_state.v67_rows += 1; st.rerun()
 
 tpl_file = st.file_uploader("📂 上傳 Amazon 模板", type=['xlsx', 'xlsm'])
 
 # --- 5. 執行填充 ---
-if st.button("🚀 啟動 V66 穩定生成", type="primary") and tpl_file and api_key:
+if st.button("🚀 啟動 V67 規範生成", type="primary") and tpl_file and api_key:
     log_area = st.empty()
     progress_bar = st.progress(0)
     try:
         log_area.text("⏳ 正在加載模板...")
         wb = openpyxl.load_workbook(tpl_file, keep_vba=True)
         sheet = wb['Template'] if 'Template' in wb.sheetnames else wb.active
-        
-        # --- 核心修復：函數定義提前 ---
         h = {re.sub(r'[^a-z0-9]', '', str(cell.value).lower()): cell.column for r in range(1, 6) for cell in sheet[r] if cell.value and isinstance(cell.value, str)}
         fixed_values = {col: sheet.cell(row=4, column=col).value for col in range(1, sheet.max_column + 1) if sheet.cell(row=4, column=col).value}
 
@@ -95,10 +94,8 @@ if st.button("🚀 啟動 V66 穩定生成", type="primary") and tpl_file and ap
 
         def fill_fixed(r):
             for col_idx, val in fixed_values.items():
-                if not sheet.cell(row=r, column=col_idx).value:
-                    sheet.cell(row=r, column=col_idx, value=val)
+                if not sheet.cell(row=r, column=col_idx).value: sheet.cell(row=r, column=col_idx, value=val)
         
-        # --- 邏輯開始 ---
         valid_items = [item for item in sku_items if item["pfx"] and item["img"]]
         indices = [re.search(r'\d+$', str(item["pfx"])).group() for item in valid_items if re.search(r'\d+$', str(item["pfx"]))]
         min_i, max_i = (min(indices), max(indices)) if indices else ("X", "Y")
@@ -108,11 +105,11 @@ if st.button("🚀 啟動 V66 穩定生成", type="primary") and tpl_file and ap
         client, row_cursor = OpenAI(api_key=api_key), 4
         start_date, end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"), (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
         
-        # SEO 深度抓取指令
-        prompt_rules = """Analyze image deeply. JSON: { 
-            "detailed_element": "Subject + background + tiny details + style.",
-            "short_element": "Concise core for Color Map (unique).",
-            "common_desc": "SEO rich description (100-150 chars) using keywords.",
+        # --- 核心修復：強制輸出格式為詞組，禁止句子 ---
+        prompt_rules = """Analyze image deeply. JSON Output: { 
+            "detailed_element": "3-6 keywords of pattern features (e.g. 'Bunny Floral Wreath Garden Style'). NO SENTENCES.",
+            "short_element": "1-3 words for Color Map (e.g. 'Floral Bunny'). NO SENTENCES.",
+            "common_desc": "Standard SEO category description 100-150 chars. NO SENTENCES.",
             "bp": ["Bullet point 25+ words.", "Bullet point...", "Bullet point...", "Bullet point...", "Bullet point..."],
             "desc": "HTML desc" 
         }"""
@@ -120,7 +117,8 @@ if st.button("🚀 啟動 V66 穩定生成", type="primary") and tpl_file and ap
         log_area.text("⏳ 正在分析全局父類特徵...")
         valid_items[0]["img"].seek(0)
         b64_p = base64.b64encode(valid_items[0]["img"].read()).decode('utf-8')
-        res_p = client.chat.completions.create(model="gpt-4o", messages=[{"role":"user","content":[{"type":"text","text":prompt_rules},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64_p}"}}]}], response_format={"type":"json_object"})
+        res_p = client.chat.completions.create(model="gpt-4o", messages=[{"role":"user","content":[{"type":"text","text":prompt_rules},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64_p}"}}]}], response_format={"type":"json_object"}
+        )
         ai_p = json.loads(res_p.choices[0].message.content)
         
         fixed_desc = ai_p.get('common_desc', '')
@@ -136,7 +134,7 @@ if st.button("🚀 啟動 V66 穩定生成", type="primary") and tpl_file and ap
 
         # B: 子類
         for step, item in enumerate(valid_items):
-            log_area.text(f"⏳ 正在深度掃描款式 #{step+1}: {item['pfx']}...")
+            log_area.text(f"⏳ 正在規範化提取款式 #{step+1}: {item['pfx']}...")
             item["img"].seek(0)
             b64 = base64.b64encode(item["img"].read()).decode('utf-8')
             res = client.chat.completions.create(model="gpt-4o", messages=[{"role":"user","content":[{"type":"text","text":prompt_rules},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}], response_format={"type":"json_object"})
@@ -156,6 +154,7 @@ if st.button("🚀 啟動 V66 穩定生成", type="primary") and tpl_file and ap
                 fill_fixed(row_cursor)
                 fill(row_cursor, ["sellersku"], f"{str(item['pfx'])}-{str(sz_cfg['size'])}")
                 fill(row_cursor, ["parentsku"], global_parent_sku)
+                # 恢復規範標題格式
                 fill(row_cursor, ["productname"], f"{deduplicate_title(f'{brand} {det_el} {fixed_desc}')} - {str(sz_cfg['size'])}")
                 fill(row_cursor, ["color", "colour", "colormap", "colourmap"], short_el)
                 fill(row_cursor, ["size", "itemsize", "sizemap"], str(sz_cfg['size']))
@@ -174,7 +173,7 @@ if st.button("🚀 啟動 V66 穩定生成", type="primary") and tpl_file and ap
         
         out = io.BytesIO()
         wb.save(out); wb.close(); gc.collect()
-        log_area.text("✅ V66 深度優化完成！")
-        st.download_button("💾 下載最終 SEO 版文件", out.getvalue(), "Amazon_V66_SEO.xlsm")
+        log_area.text("✅ V67 規範生成完成！")
+        st.download_button("💾 下載修復版文件", out.getvalue(), "Amazon_V67_SEO.xlsm")
     except Exception as e:
         st.error(f"❌ 錯誤: {e}"); gc.collect()
